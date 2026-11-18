@@ -1,0 +1,78 @@
+# LiveStream 系统架构与模块分工
+
+基线 V1.1。后端为 backend 内的一个 Go Module，包含 API Server 和 Worker 两个入口；第一版只运行一个 API Server。前端为独立 Vue 3 工程。
+
+## 技术边界
+
+HTTP 使用 CloudWeGo Hertz；WebSocket 使用 Gorilla WebSocket，经 Hertz HTTP Adaptor 接入。前端使用 Vue 3、TypeScript、Vite 和 Composition API。MySQL 8.4 保存业务与事件，Redis 7 保存实时投影、限流和请求幂等记录，Kafka 缓冲事件。
+
+该 WebSocket 接入组合有 [Hertz 官方支持](https://www.cloudwego.io/zh/docs/hertz/tutorials/third-party/protocol/websocket/)。依赖补丁版本在对应阶段锁定，设计选型不代表运行性能已经验证。
+
+## 进程和数据流
+
+浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。最终事件流为：API 校验及登记请求 → Kafka live.events → 两个独立消费者组。
+
+live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化、消费检查点和异常事件隔离。两组都读取完整事件流。
+
+RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房间的 HTTP 写入由 API 完成。Redis 计数变化仅由当前阶段指定的处理路径执行：P4 直接处理，P5 起由实时消费者处理，禁止同时执行两条路径。
+
+## 模块责任
+
+| 模块或角色 | 输入与输出 | 负责 | 依赖边界 |
+| --- | --- | --- | --- |
+| 前端页面与状态 | 用户动作、HTTP 结果、WS 消息 → 可解释的界面状态 | 登录、房间、待确认操作、去重和重连 | 不计算权威点赞总数，不访问中间件 |
+| HTTP Handler | 请求 → 响应 | 参数校验、认证上下文、错误映射 | 只调用 Service |
+| User Service | 注册登录 → 用户与令牌 | 用户名规则、密码验证、JWT | User Repository |
+| Room Service | 房间操作 → 房间状态 | 所有者权限、生命周期、准入锁 | Room Repository、RoomHub |
+| WebSocket Gateway | 票据握手及消息帧 → 已认证命令 | Origin、票据、读写循环、大小与心跳 | User 身份、Room Service、消息 Service |
+| RoomHub | 注册、移除、广播 → 连接队列 | 在线数、慢客户端、连接与房间清理 | 不执行数据库查询或 Kafka 发送 |
+| 消息 Service | 已认证命令 → 接受结果 | 限流、请求幂等、事件封装、发布策略 | 请求记录存储、EventPublisher |
+| 实时消费者 | Kafka 事件 → Redis 投影与广播 | 事件校验、投影原子更新、连续位移 | Redis、RoomHub |
+| Worker | Kafka 事件 → MySQL 事务 | inbox 去重、历史记录、检查点、异常事件 | Repository 与数据库事务 |
+| 基础设施层 | 配置 → 客户端及生命周期 | DB、Redis、Kafka 客户端、日志与退出 | 不定义业务权限或协议 |
+
+Handler 和 Repository 之间不能绕过 Service。Hertz RequestContext 留在接入层，不进入业务与数据访问层。消息发布由 EventPublisher 边界承接，阶段演进替换实现，不让前端或 RoomHub 感知 Kafka SDK。
+
+## 目标目录
+
+| 路径 | 职责 | 建立阶段 |
+| --- | --- | --- |
+| backend/go.mod、backend/go.sum | 唯一后端 Module 与锁定依赖 | P1a |
+| backend/cmd/api/main.go | API 配置、组装、启动与关闭 | P1a |
+| backend/cmd/worker/main.go | Worker 组装、启动与关闭 | P6 |
+| backend/internal/user、room | 用户与房间业务 | P1b、P2 |
+| backend/internal/websocket | Gateway、Hub、连接 | P3 |
+| backend/internal/danmaku、interaction | 弹幕与点赞业务 | P3、P4 |
+| backend/internal/messaging | 事件、发布、消费、幂等协调 | P5 |
+| backend/internal/config、database、cache、middleware | 配置及基础设施 | 随阶段建立 |
+| backend/migrations、backend/configs | 数据迁移与无秘密配置样例 | P1b 起 |
+| frontend/src、frontend/package.json | Vue 工程与检查脚本 | P1a |
+| deployments/docker/compose.yaml | 统一 Compose，按阶段启用服务 | P1b 起 |
+| backend/Dockerfile | API、Worker 镜像构建 | P7 |
+
+以上是计划目录；不为尚未使用的 Worker 或中间件创建空实现。
+
+## 容量和并发边界
+
+以下为初始保护默认值，可通过配置下调或根据压测调整，不构成性能承诺。
+
+| 项目 | 默认上限或时间 |
+| --- | --- |
+| API 总连接数、单房间连接数、单用户连接数 | 1000、200、5 |
+| 单连接业务写队列 | 128 条消息 |
+| 进程事件分发队列 | 1024 条消息 |
+| 单连接尚未完成的业务请求 | 32 个 |
+| 待使用握手票据 | 总计 10000 个，每用户每房间 3 个 |
+| 单个 WebSocket 消息 | 8 KiB |
+| 写入超时、心跳发送间隔、无响应超时 | 5 秒、20 秒、60 秒 |
+| Worker 每分区批次 | 最多 200 条或等待 100 毫秒 |
+
+每连接一个业务读循环和一个业务写循环；所有 ACK、错误、广播进入写队列。队列满或写超时则关闭该慢连接，不阻塞整房间。不要将每条消息转换成无上限 goroutine。RoomHub 移除连接、房间关闭和进程退出共享幂等清理路径。Gorilla 对并发读写的限制见 [包文档](https://pkg.go.dev/github.com/gorilla/websocket#hdr-Concurrency)。
+
+房间内业务顺序以 Kafka 分区日志顺序为准，不能解释为多个浏览器墙钟时间的全序。每分区串行处理批次，先实现正确的连续提交，再考虑并行优化。
+
+## 状态和可观测性
+
+存活与就绪分开：健康接口表示进程能响应，就绪接口根据当前阶段检查必要依赖和恢复状态。依赖不可用、恢复未完成、隔离事件待处理时报告具体能力状态。
+
+日志关联 request_id、event_id、room_id、分区和位移；禁止记录密码、Bearer、原始握手票据。记录连接数、队列占用、接受延迟、广播延迟、持久化延迟、消费者积压、重复事件和隔离事件。完整指标验证见 [验证设计](verification.md)。
