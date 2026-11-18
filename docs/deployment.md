@@ -21,7 +21,7 @@
 
 在 Windows 启动 Docker Desktop，确认使用 WSL2 引擎，并在 Settings → Resources → WSL Integration 启用当前发行版。随后在本工作区验证 Docker 客户端、服务端和 Compose 均可使用；单有 docker 可执行文件不代表容器引擎已接通。[Docker 官方说明](https://docs.docker.com/desktop/features/wsl/)
 
-本轮检查已发现当前 WSL 的 Docker/Compose 不可用。该事项属于进入 P1b 的环境准备工作，不阻塞继续完成设计，也不能记录为已经修复。
+进入 P1b 前需确认 WSL 内 Docker 客户端、服务端及 Compose 均可使用，实际复查结果统一记录在项目状态。连通性通过后，仍需在 P1b 验证固定版本的 MySQL 镜像、容器启动和 Migration。
 
 ## 分阶段依赖
 
