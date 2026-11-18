@@ -1,6 +1,6 @@
 # LiveStream 项目状态
 
-更新日期：2026 年 11 月 18 日。当前处于 D0 需求分析与设计，业务开发尚未开始。
+更新日期：2026 年 11 月 18 日。D0 需求与设计基线已完成，具备进入 P1a 工程骨架的前置条件；业务开发尚未开始。
 
 ## 已完成
 
@@ -10,8 +10,10 @@
 - 建立需求到模块责任和验收案例的映射，并同步 AGENTS 文档入口和分阶段构建规则。
 - 按用户要求删除旧 Word 工作副本、修订稿和归档目录，仅维护当前 Markdown 基线。
 - 将每轮修改检查后提交并推送当前远程分支的持续授权写入 AGENTS。
+- 已通过 [PR #1](https://github.com/TZ196/LiveStream_Go/pull/1) 将 V1.1 文档基线及任务分支、PR 工作流合并到 main，并完成本地同步。
+- 复查 WSL 内 Docker 客户端、服务端及 Compose 均可访问，之前的 Docker 连通性阻塞已解除。
 
-以上是文档与设计成果，不表示服务、接口、表、容器或恢复流程已实现。
+以上是文档、环境初检和协作流程成果，不表示服务、接口、表、业务容器或恢复流程已实现。
 
 ## 实际环境观察
 
@@ -20,11 +22,12 @@
 | 当前工作区 | /home/tz196/projects/LiveStream_Go，WSL2 Ubuntu |
 | Go | go1.26.8 linux/amd64 可执行 |
 | Node.js 与 npm | v26.13.0、11.20.0 可执行 |
-| Docker 与 Compose | 当前 WSL 命令不可正常使用，提示需要 Docker Desktop WSL Integration |
+| Docker 与 Compose | 客户端及 Engine 29.5.3、Docker Desktop 4.78.0；Compose v5.1.4，WSL 可连接服务端 |
 | 后端、前端、Compose | 尚无 backend/go.mod、frontend/package.json、deployments/docker/compose.yaml |
-| Git 文档分支 | docs/design-baseline-v1.1；每轮修改提交并推送，交付记录以 Git 提交及远程分支为准 |
+| Git 基线与流程 | PR #1 已合并到 main；任务分支提交推送、PR 检查合并及本地主干同步流程已实际执行 |
+| CI 与分支保护 | 尚未配置 CI 或 main 强制检查；当前检查由任务执行，工程建立后再接入自动检查 |
 
-观察到的工具版本尚未通过本项目的依赖组合验证。Docker 只记录问题，本轮未修改机器配置。
+观察到的工具版本尚未通过本项目的依赖组合验证。Docker 连通性不代表业务镜像已拉取、容器已启动或 Migration 已验证；本轮只检查环境，未修改机器配置。
 
 ## 验证记录
 
@@ -33,13 +36,16 @@
 | 文档内容、契约一致性与链接 | 通过 | 清理旧资料引用后检查 18 份 Markdown、44 个本地链接；15 项功能需求均在追踪矩阵中 |
 | JSON 及身份算法示例 | 通过 | 7 个 JSON 示例语法有效；Kafka 示例 UUID 版本、稳定 event_id、指纹及时间相符 |
 | 旧资料清理及 Git 差异 | 通过 | 旧 Word 数量为 0，归档目录及相关链接已移除；git diff --check 通过，提交范围仅为文档与工程规则 |
+| 开发工具与 Docker 连通性 | 通过 | go version、node --version、npm --version、docker version、docker compose version 均成功，Docker 同时返回客户端与服务端信息 |
 | 后端构建、测试、race | 未运行 | 尚无工程 |
 | 前端类型检查与构建 | 未运行 | 尚无工程 |
-| Compose 启动、故障及恢复案例 | 未运行 | 尚无配置和业务实现，Docker 也未就绪 |
+| Compose 启动、故障及恢复案例 | 未运行 | 尚无 Compose 配置和业务实现；目前仅验证 Docker 服务端连通性 |
 | 性能测试 | 未运行 | 没有可测系统 |
 
 ## 下一阶段
 
-后续任务可从 P1a 工程骨架开始；P1b 前解决 Docker 可用性。依赖的具体补丁版本、客户端兼容性和容量预算按开发计划在接入阶段核验。
+后续任务可从 P1a 工程骨架开始：建立 Hertz API、配置日志与健康接口，以及 Vue/TypeScript/Vite 页面和 HTTP 封装；以前端调用健康接口、后端构建测试及前端类型检查和构建作为本阶段验证。
 
-本轮遵循用户要求，只完成前置需求和设计工作。开始实现依据后续任务指令；提交及推送已获持续授权，每轮修改完成适用检查后执行。
+P1a 初始化时验证并锁定 Go/Hertz 与 Node/Vite 的具体依赖组合；P1b 接入 MySQL 时验证固定版本镜像、启动和 Migration；Redis/Kafka 的客户端、镜像与容量预算按接入阶段核验。
+
+本轮完成开工前复核和文档同步。业务实现依据后续任务指令；每轮修改完成适用检查后提交推送，任务完成后按已确认的 PR 工作流交付。
