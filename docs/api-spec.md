@@ -4,9 +4,9 @@
 
 ## 通用约定
 
-路径前缀为 /api/v1，JSON 使用 UTF-8。user_id、room_id、记录 id、like_count 和递增版本号均为十进制字符串，避免 JavaScript 整数精度丢失；ID 为无前导零的正整数，计数和版本可为 "0"。online_count、limit 和持续秒数为整数。HTTP 时间为 UTC RFC 3339，固定毫秒精度。
+业务接口路径前缀为 /api/v1，JSON 使用 UTF-8。user_id、room_id、记录 id、like_count 和递增版本号均为十进制字符串，避免 JavaScript 整数精度丢失；ID 为无前导零的正整数，计数和版本可为 "0"。online_count、limit 和持续秒数为整数。HTTP 时间为 UTC RFC 3339，固定毫秒精度。
 
-成功响应为 {"data": ... , "trace_id": "..."}。错误响应为 {"error": {"code": "...", "message": "...", "retryable": false}, "trace_id": "..."}。trace_id 是诊断标识，不是业务幂等键。输入不接受未定义字段。
+业务接口成功响应为 {"data": ... , "trace_id": "..."}。错误响应为 {"error": {"code": "...", "message": "...", "retryable": false}, "trace_id": "..."}。trace_id 是诊断标识，不是业务幂等键。输入不接受未定义字段。运维探针使用下文定义的独立响应。
 
 除注册、登录、健康和就绪接口外，请求携带 Authorization: Bearer 访问令牌。Content-Type 不匹配返回 415，格式错误返回 400，权限不足不能通过客户端传递用户 ID 绕过。
 
@@ -92,6 +92,8 @@ RoomStats 的以上字段均存在。P3 尚无点赞或投影恢复期间，like
 
 ## 运维接口
 
-GET /healthz 返回 200 和进程存活状态，不访问所有中间件。GET /readyz 返回 200 或 503，并提供当前阶段、必要依赖和恢复状态；两者不使用业务响应中的用户身份，也不暴露配置秘密。健康接口从 P1a 建立。
+GET /healthz 返回 200、JSON 响应 {"status":"ok"} 和 Cache-Control: no-store，仅检查进程能否响应，不访问中间件。不支持的方法返回 405。
+
+GET /readyz 返回 200 或 503，并提供当前阶段、必要依赖和恢复状态；两者不要求用户身份，也不暴露配置秘密。健康和就绪接口在 P1a 逐步建立，实际完成情况见项目状态。
 
 Vite 开发代理统一转发 /api、/ws 和健康接口。生产静态托管与 API 同源；需要额外来源时使用精确 Origin 白名单，不设置携带凭据的通配跨域规则。

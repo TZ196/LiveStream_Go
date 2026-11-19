@@ -1,6 +1,6 @@
 # LiveStream 开发环境与部署设计
 
-基线 V1.1。定义环境、配置、网络和运行边界；当前实际可用情况单独记录在 [项目状态](status.md)。本轮不安装软件、不生成 Compose 或 Dockerfile。
+基线 V1.1。定义环境、配置、网络和运行边界；当前实际可用情况单独记录在 [项目状态](status.md)。Compose 与 Dockerfile 在对应阶段建立。
 
 ## 环境和版本责任
 
@@ -15,7 +15,7 @@
 | Kafka | Apache Kafka，KRaft 单 Broker 与 Controller | P5 选择兼容版本并固定镜像；记录客户端与 Broker 组合 |
 | MySQL、Redis、Kafka 的 Go 客户端 | 满足事务、Lua、幂等生产与手动提交语义 | 各接入阶段评估一次并锁定，禁止使用未固定的 latest |
 
-当前机器上的 Go 与 Node 版本是环境观察值，不自动成为已经验证的依赖组合。初始化时先验证最小构建与协议接入，再将版本写入锁文件。
+机器上的工具版本不自动成为已经验证的依赖组合。P1a 首步已在 backend/go.mod 固定 Go 基线和 Hertz 版本，构建与接口检查结果见项目状态；前端与后续协议接入仍需独立验证。
 
 ## Docker Desktop 与 WSL
 

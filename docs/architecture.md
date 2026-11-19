@@ -8,6 +8,8 @@ HTTP 使用 CloudWeGo Hertz；WebSocket 使用 Gorilla WebSocket，经 Hertz HTT
 
 该 WebSocket 接入组合有 [Hertz 官方支持](https://www.cloudwego.io/zh/docs/hertz/tutorials/third-party/protocol/websocket/)。依赖补丁版本在对应阶段锁定，设计选型不代表运行性能已经验证。
 
+P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport 显式指定。该实现将监听错误返回给启动入口，便于统一处理端口冲突；选择理由与验证见 [首步学习记录](learning/01-minimal-http-server.md)。网络实现的性能差异尚未测量，后续 WebSocket 接入仍需单独验证。
+
 ## 进程和数据流
 
 浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。最终事件流为：API 校验及登记请求 → Kafka live.events → 两个独立消费者组。
@@ -21,7 +23,7 @@ RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房
 | 模块或角色 | 输入与输出 | 负责 | 依赖边界 |
 | --- | --- | --- | --- |
 | 前端页面与状态 | 用户动作、HTTP 结果、WS 消息 → 可解释的界面状态 | 登录、房间、待确认操作、去重和重连 | 不计算权威点赞总数，不访问中间件 |
-| HTTP Handler | 请求 → 响应 | 参数校验、认证上下文、错误映射 | 只调用 Service |
+| 业务 HTTP Handler | 请求 → 响应 | 参数校验、认证上下文、错误映射 | 只调用 Service |
 | User Service | 注册登录 → 用户与令牌 | 用户名规则、密码验证、JWT | User Repository |
 | Room Service | 房间操作 → 房间状态 | 所有者权限、生命周期、准入锁 | Room Repository、RoomHub |
 | WebSocket Gateway | 票据握手及消息帧 → 已认证命令 | Origin、票据、读写循环、大小与心跳 | User 身份、Room Service、消息 Service |
@@ -31,7 +33,7 @@ RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房
 | Worker | Kafka 事件 → MySQL 事务 | inbox 去重、历史记录、检查点、异常事件 | Repository 与数据库事务 |
 | 基础设施层 | 配置 → 客户端及生命周期 | DB、Redis、Kafka 客户端、日志与退出 | 不定义业务权限或协议 |
 
-Handler 和 Repository 之间不能绕过 Service。Hertz RequestContext 留在接入层，不进入业务与数据访问层。消息发布由 EventPublisher 边界承接，阶段演进替换实现，不让前端或 RoomHub 感知 Kafka SDK。
+业务 Handler 和 Repository 之间不能绕过 Service。存活探针不访问业务数据，无需建立额外的 Service 或 Repository。Hertz RequestContext 留在接入层，不进入业务与数据访问层。消息发布由 EventPublisher 边界承接，阶段演进替换实现，不让前端或 RoomHub 感知 Kafka SDK。
 
 ## 目标目录
 
@@ -39,6 +41,7 @@ Handler 和 Repository 之间不能绕过 Service。Hertz RequestContext 留在�
 | --- | --- | --- |
 | backend/go.mod、backend/go.sum | 唯一后端 Module 与锁定依赖 | P1a |
 | backend/cmd/api/main.go | API 配置、组装、启动与关闭 | P1a |
+| backend/internal/httpserver | Hertz 实例、HTTP 路由与探针 Handler | P1a |
 | backend/cmd/worker/main.go | Worker 组装、启动与关闭 | P6 |
 | backend/internal/user、room | 用户与房间业务 | P1b、P2 |
 | backend/internal/websocket | Gateway、Hub、连接 | P3 |

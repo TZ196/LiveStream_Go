@@ -1,0 +1,8 @@
+# Local build output and environment files.
+/backend/api
+/backend/bin/
+.env
+.env.*
+!.env.example
+*.test
+coverage.out
