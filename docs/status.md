@@ -72,7 +72,7 @@ P1b 已建立 MySQL Compose、GORM 连接池、cmd/migrate 和版本 1、2 的�
 
 交付时本地 API 为 http://127.0.0.1:8080，前端为 http://127.0.0.1:5173；healthz、readyz 和开发页面均可响应。开发进程 PID 为 355924、355935，日志与进程信息位于 /tmp/livestream-auth-dev-f82n3ht7；服务留给用户操作，关闭或重启 WSL 后按 README 重新启动。开发 users 表在交付前仍为空，迁移时间保持 07:19:35.276 和 07:25:57.615 UTC。补充中文字体后的桌面及窄屏截图已复查，视觉复查使用页面内模拟账号，没有向开发库写入演示记录。
 
-Git 记录：本轮及此前同一连续构建任务的相关修改一并审查，按当前授权提交至既有任务分支。SSH 已验证可以访问 TZ196/LiveStream_Go；两个现有 GitHub 插件连接读取该仓库均返回 404，本地也没有 GitHub CLI 及其登录配置，因此目前无法通过已登录的 API 创建或合并 PR。推送和主干状态须分别核对，不能将源码已保存说成 main 已更新。
+Git 记录：本轮及此前同一连续构建任务的相关修改已一并审查，提交 d8c4e89 已通过 SSH 推送至 origin/feat/p1a-health-server。暂存内容排除了本地 .env、真实密钥及构建产物；18 个 Go 文件格式正确，26 份 Markdown 的 212 个本地链接有效，git diff --check 通过。两个现有 GitHub 插件连接读取该仓库均返回 404，本地也没有 GitHub CLI 及其登录配置，因此本轮尚未创建或合并 PR，main 仍为 a65e298。可审阅的 PR 描述已准备在 /tmp/livestream-auth-pr-description.md。源码推送成功不表示主干已更新。
 
 ## 前一阶段：GORM 创建连接池与独立迁移验证记录
 
