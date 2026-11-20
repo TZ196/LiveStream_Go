@@ -1,0 +1,25 @@
+{
+  "name": "livestream-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.20.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "type-check": "vue-tsc --noEmit",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "vue": "3.5.45"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@vitejs/plugin-vue": "6.0.11",
+    "typescript": "5.9.3",
+    "vite": "8.3.8",
+    "vue-tsc": "3.3.14"
+  }
+}

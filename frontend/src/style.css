@@ -1,0 +1,313 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #172d32;
+  background: #f5f8f8;
+  font-synthesis: none;
+  line-height: 1.6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button, input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+button:focus-visible, a:focus-visible, summary:focus-visible {
+  outline: 3px solid #047857;
+  outline-offset: 4px;
+}
+
+.site-header {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 1.5rem 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #dce5e4;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: inherit;
+  text-decoration: none;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.site-description, .field-help, .health-note {
+  color: #52666a;
+  font-size: 0.875rem;
+}
+
+.page-content {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 3.5rem 2rem 2rem;
+}
+
+.auth-layout {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: 4rem;
+  align-items: center;
+}
+
+.eyebrow {
+  color: #047857;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+}
+
+h1 {
+  margin: 1rem 0;
+  font-size: clamp(2.5rem, 4.5vw, 3.75rem);
+  line-height: 1.3;
+  letter-spacing: -0.04em;
+}
+
+.welcome-description {
+  color: #52666a;
+  font-size: 1.125rem;
+}
+
+.welcome-note {
+  margin-top: 2.5rem;
+  padding-left: 1rem;
+  border-left: 3px solid #047857;
+  color: #52666a;
+  font-size: 0.875rem;
+}
+
+
+.auth-card {
+  min-width: 0;
+  padding: 2rem;
+  background: #fff;
+  border: 1px solid #dce5e4;
+  border-radius: 1rem;
+  box-shadow: 0 12px 40px #173d3210;
+}
+
+.form-switch {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: #edf3f2;
+  border-radius: 0.625rem;
+}
+
+.form-switch button {
+  flex: 1;
+  padding: 0.55rem;
+  color: #52666a;
+  background: transparent;
+  border: 0;
+  border-radius: 0.4rem;
+}
+
+.form-switch button[aria-pressed="true"] {
+  color: #04674c;
+  background: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 4px #173d3215;
+}
+
+h2 {
+  margin: 1.75rem 0 0.25rem;
+  font-size: 1.5rem;
+}
+
+.form-description {
+  margin: 0 0 1.5rem;
+  color: #52666a;
+  font-size: 0.875rem;
+}
+
+.form-field {
+  margin-top: 1rem;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  color: #172d32;
+  background: #fff;
+  border: 1px solid #bacac8;
+  border-radius: 0.5rem;
+}
+
+input::placeholder {
+  color: #65777b;
+}
+
+input:focus {
+  outline: 2px solid #047857;
+  outline-offset: 1px;
+}
+
+.field-help {
+  margin: 0.4rem 0 0;
+}
+
+.submit-button {
+  width: 100%;
+  margin-top: 1.5rem;
+  padding: 0.75rem;
+  color: #fff;
+  background: #047857;
+  border: 0;
+  border-radius: 0.5rem;
+  font-weight: 600;
+}
+
+.account-notice {
+  margin: 1.25rem 0 0;
+  padding-top: 1rem;
+  border-top: 1px solid #e2eae8;
+  color: #52666a;
+  font-size: 0.875rem;
+}
+
+.submit-button:hover:enabled { background: #065f46; }
+.submit-button:disabled { background: #758d85; }
+.form-message { margin: 1.25rem 0 0.75rem; overflow-wrap: anywhere; }
+.form-message[data-kind="error"] { color: #a33324; }
+.form-message[data-kind="success"] { color: #04674c; }
+.trace-note { font-size: 0.75rem; color: #52666a; overflow-wrap: anywhere; }
+.account-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.account-heading h1 { font-size: clamp(1.75rem, 3.5vw, 2.5rem); overflow-wrap: anywhere; }
+.account-card { margin-top: 1.5rem; padding: 2rem; background: #fff; border: 1px solid #dce5e4; border-radius: 1rem; }
+.account-card h2 { margin-top: 0; }
+.account-details { display: grid; gap: 1rem; margin: 1.5rem 0; }
+.account-details div { display: grid; grid-template-columns: 7rem 1fr; gap: 1rem; }
+.account-details dt { color: #52666a; }
+.account-details dd { margin: 0; overflow-wrap: anywhere; }
+
+
+/* 开发检查独立于账号表单，收起面板不会重新创建请求。 */
+.health-panel {
+  margin-top: 3rem;
+  padding: 1rem 1.25rem;
+  background: #edf3f2;
+  border: 1px solid #dce5e4;
+  border-radius: 0.75rem;
+}
+
+.health-panel summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.health-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.health-message {
+  margin: 0;
+}
+
+.health-message[data-state="online"] {
+  color: #04674c;
+}
+
+.health-message[data-state="offline"] {
+  color: #a33324;
+}
+
+.health-note {
+  margin: 0.25rem 0 0;
+}
+
+.retry-button {
+  flex-shrink: 0;
+  padding: 0.5rem 0.8rem;
+  color: #172d32;
+  background: #fff;
+  border: 1px solid #bacac8;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.retry-button:hover:enabled {
+  border-color: #047857;
+  color: #04674c;
+}
+
+.retry-button:disabled {
+  color: #65777b;
+  background: #edf3f2;
+}
+
+
+/* 窄屏按阅读顺序排列介绍和表单，不挤压输入框。 */
+@media (max-width: 760px) {
+  .site-header {
+    padding: 1rem 1.25rem;
+  }
+
+  .page-content {
+    padding: 2rem 1.25rem;
+  }
+
+  .auth-layout {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+
+  .welcome-note {
+    margin-top: 1.25rem;
+  }
+
+  .welcome-description br {
+    display: none;
+  }
+
+  .auth-card {
+    padding: 1.5rem;
+  }
+
+  .account-heading { align-items: flex-start; flex-direction: column; }
+  .account-card { padding: 1.5rem; }
+  .account-details div { grid-template-columns: 1fr; gap: 0.25rem; }
+
+  .health-panel {
+    margin-top: 2rem;
+  }
+
+  .health-content {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+}

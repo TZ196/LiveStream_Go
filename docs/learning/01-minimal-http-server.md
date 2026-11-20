@@ -2,6 +2,8 @@
 
 日期：2026 年 11 月 19 日。属于 P1a 工程骨架的第一小步，目标是理解并跑通一次 HTTP 请求。后续仍需完成配置、日志与就绪检查、前端工程和联调，才能验收完整 P1a。
 
+本页说明首步概念与操作；后续配置见 [第二步学习记录](02-config-logging-readiness.md)。当前已进入 P1b，启动后端前还需要 MySQL 和环境变量，完整运行命令以 [仓库 README](../../README.md) 为准；健康接口的含义保持不变。
+
 ## 场景与范围
 
 开始用户认证、房间和实时互动之前，先需要一个能够接收 HTTP 请求的后端进程。本步提供 GET /healthz，用于判断进程能否响应；它不查询数据库、Redis 或 Kafka，也不证明任何业务功能已经可用。具体响应定义见 [HTTP 契约](../api-spec.md)。
@@ -16,7 +18,6 @@
 | [go.sum](../../backend/go.sum) | 保存依赖内容的校验值；它不是全部依赖版本的锁文件，也不能证明依赖不存在安全问题 |
 | [main.go](../../backend/cmd/api/main.go) | 可执行程序入口：读取监听参数、组装服务、等待退出信号，并将启动错误转换为非零退出码 |
 | [server.go](../../backend/internal/httpserver/server.go) | 创建 Hertz 实例，注册路由，定义健康接口响应；New 本身不监听端口 |
-| [server_test.go](../../backend/internal/httpserver/server_test.go) | 通过 Hertz 的请求测试工具验证响应和路由边界，不占用真实端口 |
 
 一个 Module 可以包含多个 Package 和可执行入口。backend/internal/httpserver 是后端内部包，cmd/api 是本步的可执行入口；后续 Worker 仍可以使用同一个 Module。Module 主要管理依赖，不代表微服务数量。依赖命令与校验方式参考 [Go 官方依赖管理说明](https://go.dev/doc/modules/managing-dependencies)。
 
@@ -53,7 +54,7 @@ health 的 context.Context 参数与 Hertz RequestContext 是两个不同概念�
 go run ./cmd/api -addr 127.0.0.1:8081
 ```
 
-后续配置阶段再统一环境配置、校验与日志。默认绑定回环地址，仅用于本地开发。
+当前环境变量、配置校验与日志见第二步学习记录。默认绑定回环地址，仅用于本地开发。
 
 ## 验证正常和失败路径
 
@@ -76,14 +77,11 @@ main 通过缓冲为 1 的信号通道接收退出通知。自定义 signal wait
 
 实际验证发现，在当前 Linux 环境中，Hertz v0.10.6 默认 Netpoll 实现遇到端口占用会直接 panic。因此本步显式使用 Hertz 内置的标准网络实现，它会将监听错误返回给启动入口。仍使用 Hertz 的路由和请求上下文。保留默认 Netpoll 也是可选方案，但需要另行处理其启动失败行为；当前没有负载测量，不能声称一种网络实现比另一种更快。配置方式见 [Hertz 网络库说明](https://www.cloudwego.io/docs/hertz/tutorials/basic-feature/network-lib/)。
 
-在 backend 目录执行本步检查：
+以下检查由助手执行，日常学习不要求逐条重复。在 backend 目录执行：
 
 ```bash
 go vet ./...
-go test ./...
-go test -race ./...
 go build -o bin/api ./cmd/api
-go mod verify
 ```
 
 构建后，可在 backend 目录按以下顺序检查真实进程。先确认 18080 端口空闲；第一条命令启动的进程 PID 只用于本次检查：
@@ -101,10 +99,10 @@ printf '第一个进程退出码：%s\n' "$?"
 
 第二个进程应退出为 1，第一个收到 SIGTERM 后应退出为 0。重新运行一次，将 kill -TERM 改为 kill -INT，可检查 SIGINT。这里使用构建后的二进制，避免把 go run 的编译包装进程和实际服务进程混淆。信号测试只覆盖当前无业务任务的退出，不能证明未来连接和后台任务已正确排空。
 
-测试验证健康响应和请求边界；真实进程还需验证监听、端口冲突和信号退出。go mod verify 校验已下载模块的完整性，不能代替测试或漏洞审查。实际检查结果记录在 [项目状态](../status.md)。
+当前已按用户要求删除接口测试文件，健康响应、路由边界、监听、端口冲突和信号退出通过实际进程检查。`go test ./...` 会显示 `no test files`，不能据此声称接口用例通过。实际检查结果记录在 [项目状态](../status.md)。
 
 ## 本步复盘
 
 你应能解释：Go Module 与 Package 的区别；为什么 main 只负责组装和生命周期；路由为何同时匹配方法和路径；存活与业务就绪的区别；为什么启动失败需要非零退出码。
 
-本步证据是构建、接口与进程行为验证。尚未进行吞吐或延迟压测，不能从几个成功请求推导连接容量或性能成绩。下一小步再处理配置校验、日志和就绪状态。
+本步证据是构建、接口与进程行为验证。尚未进行吞吐或延迟压测，不能从几个成功请求推导连接容量或性能成绩。继续阅读 [第二步](02-config-logging-readiness.md) 时，先理解配置数据和读取顺序，再逐个学习日志与就绪状态。

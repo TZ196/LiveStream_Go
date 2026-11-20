@@ -12,7 +12,7 @@
 
 ## 认证和凭据
 
-访问令牌为 JWT，算法固定 HS256，校验签名、iss=livestream-api、aud=livestream-browser、sub、iat 和 exp，拒绝客户端选择其他算法。sub 为用户 ID 字符串；有效期 30 分钟，允许最多 30 秒时钟偏差。签名密钥使用至少 32 随机字节，通过环境注入，不提供可运行的默认密钥。
+访问令牌为 JWT，算法固定 HS256，校验签名、iss=livestream-api、aud=livestream-browser、sub、iat 和 exp，拒绝客户端选择其他算法。sub 为用户 ID 字符串；iat 和 exp 必须存在，exp 晚于 iat 且二者间隔不超过 30 分钟，允许最多 30 秒时钟偏差。签名密钥使用至少 32 随机字节的标准 Base64 编码，经 LIVESTREAM_JWT_SECRET 注入，无可运行的默认密钥；解码后的字节用于签名。
 
 前端将令牌保存在内存，刷新页面后重新登录；V1 不实现刷新令牌。退出登录清空内存并关闭该页面连接，不宣称已经撤销其他客户端持有的 JWT。过期长连接按 WebSocket 协议关闭。
 
@@ -20,12 +20,19 @@
 
 注册与登录在 P1b 即采用有界的进程内限流，每个来源 IP 每 60 秒合计最多 10 次尝试，最多并行执行 4 个密码计算；达到边界返回 429。P4 起可将窗口计数迁入 Redis，避免将 Redis 提前设为登录前置依赖。
 
+当前窗口按 Unix 时间对齐整分钟，最多保存 10000 个来源 IP，窗口切换时清空上一窗口计数，进程重启也会清空。仅使用 TCP 对端 IP，不信任 X-Forwarded-For/X-Real-IP；本地 Vite 代理后的浏览器因此共享同一来源。429 携带 Retry-After 秒数，前端等待后由用户主动重试。密码计算名额覆盖本次注册/登录操作，达到上限不排队。未知账号也执行一次同参数密码校验，以减少快速失败带来的响应差异。
+
+当前业务请求预算为 3 秒，MySQL 查询传递该 context；已经开始的 Argon2id 运算会在当前调用内完成，名额在操作结束后释放，不启动脱离请求的计算 goroutine。HTTP 请求体上限 8 KiB，读取超时为 5 秒。请求在 Hertz 协议解析阶段被拒绝时可返回纯文本 400/408/413/431；进入业务 Handler 后统一使用本文 JSON 错误格式。业务响应均设置 Cache-Control: no-store，并返回服务端生成的 X-Trace-ID，与响应及访问日志中的 trace_id 相同。
+
+注册、登录只接受单个 JSON 对象和 username、password 字段，不接受查询参数。注册成功不签发令牌、不自动登录；登录成功后前端用 Bearer 调用 users/me 确认身份。退出只清除当前页面会话，没有服务端 logout 接口或 JWT 撤销表。注册请求超时或网络中断时可能已经写入，前端不自动重发，提示先尝试登录确认结果。
+
 ## 接口清单
 
 | 方法与路径 | 请求 | 成功 data 与状态 | 说明 |
 | --- | --- | --- | --- |
 | POST /api/v1/auth/register | username、password | User，201 | 用户名规范化后唯一；不自动登录 |
 | POST /api/v1/auth/login | username、password | access_token、token_type=Bearer、expires_in=1800、User 字段 user，200 | 无效凭据统一 401 |
+| GET /api/v1/users/me | 无 | User，200 | P1b 认证联调；从 Bearer 中确定当前用户，拒绝查询参数和请求体 |
 | POST /api/v1/rooms | title | Room，201 | owner_id 来自令牌 |
 | GET /api/v1/rooms | status、owner、limit、cursor | items: Room[]、next_cursor，200 | status 默认 OPEN，可为 CLOSED；owner 可省略或为 me；按 id 倒序 |
 | GET /api/v1/rooms/{id} | 无 | Room，200 | 包含关闭房间 |
@@ -94,6 +101,19 @@ RoomStats 的以上字段均存在。P3 尚无点赞或投影恢复期间，like
 
 GET /healthz 返回 200、JSON 响应 {"status":"ok"} 和 Cache-Control: no-store，仅检查进程能否响应，不访问中间件。不支持的方法返回 405。
 
-GET /readyz 返回 200 或 503，并提供当前阶段、必要依赖和恢复状态；两者不要求用户身份，也不暴露配置秘密。健康和就绪接口在 P1a 逐步建立，实际完成情况见项目状态。
+GET /readyz 返回 JSON 和 Cache-Control: no-store。当前 P1b 数据库接入后的响应字段如下：
+
+| 字段 | 当前含义 |
+| --- | --- |
+| status | starting、ready、not_ready 或 stopping；仅 ready 返回 200，其余返回 503 |
+| stage | 固定为 P1b，表示正在实现的阶段，不代表注册登录已完成 |
+| dependencies | 仅包含 mysql：未检查为 not_checked，查询和版本检查通过为 ready，失败为 unavailable；不包含未接入的 Redis、Kafka |
+| recovery | not_applicable；本阶段没有投影恢复链路 |
+
+API 在监听前检查 MySQL 连接、迁移版本和所需列，失败直接退出，因此初始化失败通常表现为连接不上 API。运行期间，每次就绪请求在 1 秒预算内重新执行只读检查；失败返回 not_ready/503，数据库恢复并通过检查后可重新返回 ready/200。检查不读取账号记录，也不证明所有索引、约束或业务功能均正确。
+
+开始停止时生命周期改为 stopping，之后不能重新变为 ready；探针在数据库检查后再次核对停止状态。不支持的方法返回 405。后续阶段接入其他依赖和恢复检查时同步扩展契约与验收。
+
+两种探针均不要求用户身份，也不暴露配置秘密。未就绪不改变 /healthz 的存活含义；开始关闭网络监听后，客户端也可能直接收到连接失败，不能保证一定观察到 503。实际完成情况见项目状态。
 
 Vite 开发代理统一转发 /api、/ws 和健康接口。生产静态托管与 API 同源；需要额外来源时使用精确 Origin 白名单，不设置携带凭据的通配跨域规则。

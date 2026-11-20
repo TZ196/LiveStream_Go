@@ -1,12 +1,14 @@
 # LiveStream 数据模型与存储设计
 
-基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。本文为逻辑和物理设计，尚未创建 Migration 或执行数据库变更。
+基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。P1b 首步已实现 users 与迁移版本表，其余业务表和 Redis 键仍为后续设计；实际执行结果见 [项目状态](status.md)。
 
 ## 通用约定
 
 MySQL 使用 InnoDB、utf8mb4，业务时间以 UTC DATETIME(3) 存储。业务主键为 BIGINT UNSIGNED，自增值对外使用字符串。UUID 使用 CHAR(36) ASCII 二进制排序，指纹使用 BINARY(32)。用户名使用规范化小写 ASCII，建立唯一索引。
 
 外键限定为 RESTRICT，不级联删除事件；V1 不提供删除用户、房间或历史事件功能。所有 SQL 参数化。历史页按房间与 id 查询，不执行无上限全表返回。
+
+MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository。模型按本文及已应用迁移映射，不因引入 GORM 就增加软删除列或其他未设计字段；采用显式字段，避免直接嵌入 gorm.Model 改变表定义。表结构由 Migration 管理，启动不调用 AutoMigrate。框架不会代替用户名唯一约束、事务边界或消费幂等设计；选型见 [GORM 决策](decisions/0004-gorm-database-access.md)。
 
 ## 业务表
 
@@ -18,6 +20,8 @@ MySQL 使用 InnoDB、utf8mb4，业务时间以 UTC DATETIME(3) 存储。业务�
 | interaction_events | id；event_id；room_id 外键 live_rooms；user_id 外键 users；event_type，仅 LIKE_CLICKED；created_at；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(room_id,id) | P6 |
 
 表内业务字段除明确可空项外均为 NOT NULL。CHECK 约束确保 OPEN 的 closed_at 为空、CLOSED 的 closed_at 非空。接口校验不代替唯一约束和数据库事务。
+
+当前 users 的 username 使用 ASCII 字符集、ascii_bin 排序和唯一索引；CHECK 限定 3–32 位小写 ASCII 字母、数字、下划线且首位为字母。User Service 按领域模型规范化输入，Repository 通过 GORM 写入，数据库唯一约束裁决并发同名注册。password_hash 保存包含参数、随机盐和输出的 Argon2id 编码；不保存明文密码。账号认证复用现有四列，未新增迁移或修改结构版本。
 
 V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理；点赞汇总从 Redis 读取，恢复时从 interaction_events 唯一事件汇总。避免建立没有业务生命周期定义的成员或统计副本。
 
@@ -74,4 +78,25 @@ V1 MySQL 业务历史不自动清理。Redis 旧 epoch 仅在恢复验证、切�
 
 ## 迁移与版本
 
-按 P1b 用户、P2 房间、P6 事件及恢复表逐次增加 Migration，不改写已应用文件。每次说明前置版本、回滚限制和数据兼容性。业务约束更新同步领域模型、协议和验收；数据库备份与 Kafka 日志删除不在普通 Migration 授权之内。
+唯一日常入口是在 backend 目录执行 `go run ./cmd/migrate`。命令通过 GORM 连接目标数据库，按版本执行、成功记录、失败停止；目标库本身由 Compose 初始化。调度逻辑位于 [migrate.go](../backend/migrations/migrate.go)，只在独立命令中调用，不随 API 启动执行。
+
+schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETIME(3)，只保存成功版本和执行时间。首次执行时用 GORM 创建该记录表；成功记录必须从 1 连续递增，拒绝缺号或高于程序所支持版本的记录。已成功版本直接跳过，保留原 applied_at，不重新建表或覆盖用户数据。
+
+| 版本 | 固定迁移步骤 | 前置条件与结果 |
+| --- | --- | --- |
+| 1 | [000001_create_users.go](../backend/migrations/000001_create_users.go) 使用固定 userV1 模型与 Migrator.CreateTable 建立 users | 无成功版本且不存在 users；完成后登记 1，不复用未来会变化的业务模型 |
+| 2 | [000002_tighten_username_check.go](../backend/migrations/000002_tighten_username_check.go) 通过 GORM.Exec 原子替换用户名 CHECK | 已成功执行 1；校验长度、字母开头及非法字符，完成后登记 2 |
+
+版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
+
+当前工作区只保留上述 Go 迁移文件。独立命令兼容此前 SQL 阶段留下的同一份成功记录：已有版本 1 只执行 2，已有版本 2 不再执行结构变更。本轮没有恢复旧 SQL 文件，也没有修改迁移步骤或数据库版本。
+
+命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
+
+MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体回滚的事务。失败或中断后先检查实际表、约束与成功记录：若某步未生效，修复原因后重试；若 DDL 已生效而记录未写入，须依据该版本逐项核对并完成受控修复后再恢复迁移。命令不会自动接管无版本的已有表、补写版本或回滚删表。不能通过强写版本号、重复整份旧 SQL 或删库重建掩盖失败。[MySQL 隐式提交说明](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)
+
+当前 API 要求成功记录连续且最新版本恰好为 2，并检查 users 所需列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
+
+按 P1b 用户、P2 房间、P6 事件及恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/schema.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
+
+API 和 Worker 正常启动只校验所需迁移版本，不隐含执行删表、清库或重建；Migration 与开发数据清理有独立入口和明确操作说明。重启前后已有数据及迁移版本应保持，按 [ENV-03](verification.md) 逐阶段验证。该约束对应参考项目启动删表问题，证据见 [ISSUE-01](reviews/live-stream-danmaku-review.md)。
