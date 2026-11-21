@@ -14,7 +14,7 @@ body {
   margin: 0;
 }
 
-button, input {
+button, input, select {
   font: inherit;
 }
 
@@ -209,6 +209,27 @@ input:focus {
 .account-details dt { color: #52666a; }
 .account-details dd { margin: 0; overflow-wrap: anywhere; }
 
+.session-nav, .room-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.session-nav { margin-bottom: 2rem; }
+.session-nav [aria-current="page"] { color: #04674c; background: #e1f2e9; border-color: #047857; }
+.room-create h2 { margin-bottom: 1rem; }
+.room-create-fields { display: flex; align-items: center; gap: 1rem; }
+.room-create-fields .submit-button { width: auto; flex-shrink: 0; margin: 0; padding: 0.75rem 1.5rem; }
+.room-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 2rem 0 1rem; }
+.room-filters select { min-width: 8rem; padding: 0.5rem 0.75rem; border: 1px solid #bacac8; border-radius: 0.5rem; background: #fff; color: #172d32; }
+.room-filters select:focus-visible { outline: 2px solid #047857; outline-offset: 2px; }
+.room-grid { list-style: none; padding: 0; margin: 1rem 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.room-card { padding: 1.5rem; background: #fff; border: 1px solid #dce5e4; border-radius: 1rem; }
+.room-card h2 { margin: 0.75rem 0; overflow-wrap: anywhere; }
+.room-card .retry-button { margin-top: 1rem; }
+.room-badge { display: inline-block; padding: 0.2rem 0.65rem; border-radius: 1rem; color: #04674c; background: #e1f2e9; font-size: 0.8rem; font-weight: 600; }
+.room-badge[data-status="CLOSED"] { background: #edf0f1; color: #52666a; }
+.room-title { font-size: clamp(1.75rem, 3.5vw, 2.5rem); overflow-wrap: anywhere; }
+.room-more, .room-close { margin-top: 1.5rem; }
+.empty-state { padding: 2rem; text-align: center; color: #52666a; border: 1px dashed #bacac8; border-radius: 1rem; }
+.danger-button { color: #a33324; border-color: #d8aaa3; }
+.danger-button:hover:enabled { color: #872315; border-color: #a33324; }
+
 
 /* 开发检查独立于账号表单，收起面板不会重新创建请求。 */
 .health-panel {
@@ -300,6 +321,8 @@ input:focus {
   .account-heading { align-items: flex-start; flex-direction: column; }
   .account-card { padding: 1.5rem; }
   .account-details div { grid-template-columns: 1fr; gap: 0.25rem; }
+  .room-grid { grid-template-columns: 1fr; }
+  .room-create-fields { align-items: stretch; flex-direction: column; }
 
   .health-panel {
     margin-top: 2rem;
