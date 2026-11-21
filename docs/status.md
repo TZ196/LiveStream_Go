@@ -31,7 +31,7 @@
 
 本地开发库已从 2 升到 3，原用户内容及版本 1、2 的成功时间逐项比对不变。API 已更新，PID 414135，日志在上述目录 `local-api.log`；现有 Vite PID 355935 继续运行。http://127.0.0.1:8080/readyz 返回 P2/ready，http://127.0.0.1:5173 可访问。关闭或重启 WSL 后按 README 启动。
 
-本轮任务分支为 feat/p2-room-management，基于 origin/main 建立并快进继承尚未合并的认证前置提交 80d9861。GitHub 两个插件连接现可读取仓库，但均没有推送/管理权限，且都不是 TZ196；本机没有 GitHub CLI 登录或 API 令牌。SSH 通过 443 端口及已有 github.com 主机密钥校验可以获取远程；没有关闭主机校验或修改机器配置。main 当前仍未包含认证和本轮房间代码，不能将任务分支交付当作主干更新。 实现提交 d0a5535 已成功推送 origin/feat/p2-room-management 并建立 upstream；PR 说明已准备在 `/tmp/livestream-room-check-mwqghnws/pr-description.md`。创建 PR 的账号选择已向用户提出，尚未创建或合并；没有绕过 PR 直接推送 main。
+本轮任务分支为 feat/p2-room-management，基于 origin/main 建立并快进继承尚未合并的认证前置提交 80d9861。GitHub 两个插件连接现可读取仓库，但均没有推送/管理权限，且都不是 TZ196；本机没有 GitHub CLI 登录或 API 令牌。SSH 通过 443 端口及已有 github.com 主机密钥校验可以获取远程；没有关闭主机校验或修改机器配置。main 当前仍未包含认证和本轮房间代码，不能将任务分支交付当作主干更新。 实现提交 d0a5535 已成功推送 origin/feat/p2-room-management 并建立 upstream；PR 说明已准备在 `/tmp/livestream-room-check-mwqghnws/pr-description.md`。用户已明确选择使用 TZ196 创建及合并 PR，无需再次询问账号。当前插件尚无 TZ196 连接，需用户在 GitHub 登录授权流程中完成连接；现有两个账号不用于写操作。PR 尚未创建或合并，没有绕过 PR 直接推送 main。
 
 ## 待解决问题
 
