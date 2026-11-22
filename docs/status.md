@@ -1,8 +1,28 @@
 # LiveStream 项目状态
 
-更新日期：2026 年 11 月 21 日。P2 房间管理已接通：登录 → 创建房间 → 列表筛选/分页 → 查看详情 → 房主关闭。P1b 账号流程保留；下一轮以点赞为目标补齐实时连接与 Redis。教学入口见 [第六步学习记录](learning/06-room-management.md)。
+更新日期：2026 年 11 月 22 日。P1b 账号流程和 P2 房间管理已合入远程 main：登录 → 创建房间 → 列表筛选/分页 → 查看详情 → 房主关闭。下一轮以点赞为目标补齐实时连接与 Redis。教学入口见 [第六步学习记录](learning/06-room-management.md)。
+
+## 11 月 22 日主干合并记录
+
+用户本轮明确允许使用 TZ196 的 SSH 直接合并并推送 main。本次没有创建 PR，不改变后续任务的既定 PR 工作流；没有强制推送或删除任务分支。
+
+- feat/p1a-health-server 的 80d9861 通过合并提交 5eb8470 纳入 main，包含工程基础、数据库迁移和用户认证。
+- feat/p2-room-management 的 90ee7ec 随后通过合并提交 ccb850c 纳入 main，包含房间管理、前端页面和待解决问题记录。
+- 两次合并均无冲突，保留原提交历史；合并后的文件树与预检通过的 90ee7ec 完全一致。本次额外修改仅为本页交付记录。
+- 合并提交已推送，随后通过远程引用核对 origin/main 为 ccb850c，两个任务分支的提交均为其祖先。
+
+| 本轮检查 | 状态 | 实际结果与边界 |
+| --- | --- | --- |
+| Go 格式、静态检查与构建 | 通过 | 23 个 Go 文件格式正确；go vet ./...、go build ./cmd/api ./cmd/migrate 成功 |
+| Go 测试命令 | 无用例 | go test ./... 成功退出，10 个包均为 no test files，没有执行测试用例 |
+| 前端类型与构建 | 通过 | npm run type-check、npm run build 成功 |
+| Compose 配置 | 通过，使用现有 Windows CLI | 当前 WSL 的 docker 命令提示集成不可用；改用已安装的 Windows docker.exe，将同一 Compose 文本及占位密码通过标准输入交给 config --quiet。未启动服务或修改数据库 |
+| Git 检查 | 通过 | 分支 Diff 无空白错误，合并无冲突，已确认远程主干包含两个分支；未把插件的空检查结果解释为 CI 通过 |
+| 集成、浏览器及竞态行为 | 本轮未运行 | 沿用下方历史验证记录，本次没有改动业务代码；原 /tmp/livestream-room-check-mwqghnws 检查文件已不存在，不能作为本轮可直接运行的验证入口 |
 
 ## P2 房间管理交付
+
+以下为 11 月 21 日交付时的记录，运行进程、临时文件和 Git 状态均描述当时情况；当前合并结果以上方 11 月 22 日记录为准。
 
 - 新增 Room Handler、Service、Repository 和筛选绑定游标，沿用 Hertz、GORM 与既有依赖。四个房间接口均经过 Bearer 鉴权；房主来自认证身份，客户端不能指定 owner_id。
 - 新增固定迁移版本 3：live_rooms、组合索引、RESTRICT 外键及状态/关闭时间 CHECK。版本 1、2 文件未修改；API 和 readyz 只读检查版本 3，stage 为 P2。
