@@ -1,0 +1,12 @@
+# Local build output and environment files.
+/backend/api
+/backend/bin/
+.env
+.env.*
+!.env.example
+*.test
+coverage.out
+
+# 前端依赖和构建产物不提交。
+/frontend/node_modules/
+/frontend/dist/

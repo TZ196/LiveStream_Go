@@ -1,0 +1,33 @@
+name: livestream
+
+services:
+  mysql:
+    # 固定补丁版本和镜像摘要，避免同一个配置拉到不同内容。
+    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    environment:
+      MYSQL_DATABASE: ${LIVESTREAM_MYSQL_DATABASE:-livestream}
+      MYSQL_USER: ${LIVESTREAM_MYSQL_USER:-livestream}
+      MYSQL_PASSWORD: ${LIVESTREAM_MYSQL_PASSWORD:?请设置 LIVESTREAM_MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请设置 MYSQL_ROOT_PASSWORD}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    ports:
+      # 本地开发默认只绑定回环地址，和 Go 使用的地址保持一致。
+      - "${LIVESTREAM_MYSQL_ADDR:-127.0.0.1:3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # 使用 TCP 和应用账号执行查询，避免把初始化期间的临时实例当成可用。
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$${MYSQL_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -u "$${MYSQL_USER}" "$${MYSQL_DATABASE}" -e 'SELECT 1' >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  mysql_data:
