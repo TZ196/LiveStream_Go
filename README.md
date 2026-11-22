@@ -1,52 +1,23 @@
 # LiveStream 实时直播互动系统
 
-LiveStream 面向本地开发，目标包含用户认证、直播间管理、实时弹幕、点赞、在线连接统计和异步事件持久化。当前已接通账号和房间管理：注册登录后，可以创建房间、筛选分页、查看详情及由房主关闭。后端使用 Hertz、GORM 和 MySQL；下一步围绕点赞接入实时连接与 Redis。
+面向本地开发的直播互动项目。当前已实现注册登录、当前用户查询，以及直播间创建、筛选分页、详情和房主关闭；下一步开发 WebSocket 连接基础能力与 Redis 点赞。
 
-设计基线为 **V1.1，2026 年 11 月 18 日**，后续选型按决策记录更新。后端采用 Go、CloudWeGo Hertz 和 Gorilla WebSocket，MySQL 访问统一使用 GORM；前端采用 Vue 3、TypeScript 和 Vite，Redis、Kafka 随开发阶段接入。
+后端使用 Go、CloudWeGo Hertz、GORM 和 MySQL，前端使用 Vue 3、TypeScript 和 Vite。弹幕、在线连接统计、Kafka 与 Worker 持久化按阶段接入；当前没有音视频播放、礼物或支付功能。
 
-从 [文档导航与职责](docs/README.md) 开始阅读。需求见 [需求规格](docs/requirements.md)，实施顺序见 [开发计划](docs/development-plan.md)，实际完成情况见 [项目状态](docs/status.md)。工程协作规则见 [AGENTS.md](AGENTS.md)。
+## 开始使用
 
-## 运行当前后端
+按 [开发与运行说明](docs/deployment.md) 配置本地 `.env`，启动 MySQL，执行迁移，再分别运行 API 和前端。当前 Compose 只包含 MySQL；每位协作者使用自己的本地配置与数据卷。
 
-当前使用 Go 1.26.8、Hertz v0.10.6、GORM v1.31.2、MySQL 8.4.13。第一次在新工作区运行，先按 [MySQL 初始化说明](docs/learning/04-mysql-and-migration.md) 配置根目录 `.env`、启动 MySQL 并执行迁移。
+前端默认地址为 http://127.0.0.1:5173 ，API 为 http://127.0.0.1:8080 。登录后可以创建和管理直播间；登录凭证保存在页面内存，刷新、退出或到期后需要重新登录。
 
-本工作区已有本地 `.env`、随机 JWT 签名密钥与数据库版本 3。其他已有版本 2 的工作区先运行迁移，新增房间表，保留原用户数据。新工作区还需填写样例中的 `LIVESTREAM_JWT_SECRET`：至少 32 随机字节的标准 Base64 编码，无默认密钥。MySQL 映射使用 `127.0.0.1:13306`，避开环境中已有的 3306 实例。日常在仓库根目录执行：
+## 项目入口
 
-```bash
-docker compose --env-file .env -f deployments/docker/compose.yaml up -d --wait mysql
-set -a
-source .env
-set +a
-cd backend
-go run ./cmd/migrate && go run ./cmd/api
-```
+| 需要了解的内容 | 入口 |
+| --- | --- |
+| 当前完成情况、待解决问题 | [项目状态](docs/status.md) |
+| 接下来的开发顺序 | [开发计划](docs/development-plan.md) |
+| 需求、业务规则与技术设计 | [文档导航](docs/README.md) |
+| 验收案例与实际结果 | [验证计划](docs/verification/plan.md)、[阶段报告](docs/README.md#验证记录) |
+| 协作、代码和 Git 规则 | [AGENTS.md](AGENTS.md) |
 
-迁移命令按编号执行尚未成功的版本，成功后记录，失败停止；只有迁移命令成功，`&&` 后的 API 才会启动。已有版本 2 时只执行版本 3；已有版本 3 时跳过结构变更。API 本身只检查结构，不自动改表。
-
-在另一个终端执行 `curl -i http://127.0.0.1:8080/healthz`，预期得到 HTTP 200 和 `{"status":"ok"}`。端口可通过 `go run ./cmd/api -addr 127.0.0.1:8081` 覆盖。
-
-GET /readyz 现在检查 MySQL：正常时返回 200，`stage` 为 `P2`、`dependencies.mysql` 为 `ready`；运行期间数据库不可用返回 503，`/healthz` 仍只表示进程能响应。配置样例位于 [backend/configs/.env.example](backend/configs/.env.example)。本步文件分工、首次建表与故障处理见 [第四步学习记录](docs/learning/04-mysql-and-migration.md)。
-
-基础请求过程见 [第一步学习记录](docs/learning/01-minimal-http-server.md)。
-
-## 运行当前前端
-
-保留后端终端，在另一个终端从仓库根目录执行：
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-打开 http://127.0.0.1:5173 。已安装依赖且锁文件未变化时，可以直接执行 `npm run dev`。本轮使用 Node.js v26.13.0、npm 11.20.0；依赖具体版本由 package.json 和 package-lock.json 锁定。
-
-页面可以实际注册和登录。注册成功后输入同一密码登录，页面查询当前账号后进入房间列表；可创建、查看房间，按状态和本人筛选、加载更多，房主可确认关闭自己的房间。导航中的“我的账号”保留账号查询与退出。登录凭证仅保存在当前页面内存中，刷新页面需重新登录，30 分钟后结束会话。开发连接检查仍只确认 API 进程能响应。
-
-用户名去除首尾 ASCII 空格并转小写，3–32 位字母、数字或下划线，以字母开头。密码为 12–128 个 Unicode 字符，保留空格。注册与登录按来源 IP 共享每个整分钟 10 次限制，过快操作会显示等待倒计时；通过本地 Vite 代理的浏览器共用代理的来源地址。
-
-后端改用 8081 时，在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](frontend/.env.example) 建立 `.env.local` 后重启开发服务。
-
-前端检查命令为 `npm run type-check` 和 `npm run build`。构建生成的 `frontend/dist/` 尚未接入后端静态托管；开发连接检查面板不显示在生产页面。文件分工、请求链路和当前边界见 [第三步学习记录](docs/learning/03-frontend-and-health.md)。
-
-本轮请求经过各层的说明见 [第五步：账号流程](docs/learning/05-user-authentication.md)。房间流程见 [第六步：房间管理](docs/learning/06-room-management.md)。下一步以点赞为目标，补齐最小 WebSocket 通路与 Redis 计数；[待解决问题](docs/status.md#待解决问题)跟踪关闭与在途发送、断线清理。当前没有音视频播放能力。
+后端代码位于 `backend/`，前端位于 `frontend/`，Compose 配置位于 `deployments/docker/`。当前后端入口是 `cmd/api` 和独立迁移命令 `cmd/migrate`，Worker 在对应阶段建立。
