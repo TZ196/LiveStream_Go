@@ -8,7 +8,7 @@ import (
 )
 
 // RequiredSchemaVersion 是当前程序需要的结构版本，新增迁移时同步更新。
-const RequiredSchemaVersion uint64 = 2
+const RequiredSchemaVersion uint64 = 3
 
 // CurrentVersion 读取成功记录，拒绝缺号、重复或从零开始的异常历史。
 func CurrentVersion(ctx context.Context, db *gorm.DB) (uint64, error) {
@@ -50,6 +50,19 @@ func CheckSchema(ctx context.Context, db *gorm.DB) error {
 	}
 	if err = rows.Err(); err != nil {
 		return fmt.Errorf("读取 users 表检查结果失败: %w", err)
+	}
+
+	query = db.WithContext(ctx).Table("live_rooms")
+	query = query.Select("id", "owner_id", "title", "status", "created_at", "closed_at").Limit(0)
+	rows, err = query.Rows()
+	if err != nil {
+		return fmt.Errorf("检查 live_rooms 表失败: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("关闭 live_rooms 表检查结果失败: %w", err)
+	}
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("读取 live_rooms 表检查结果失败: %w", err)
 	}
 	return nil
 }

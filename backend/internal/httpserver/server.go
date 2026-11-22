@@ -9,6 +9,7 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
+	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -17,7 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const Stage = "P1b"
+const Stage = "P2"
 
 const (
 	stateStarting int32 = 0
@@ -31,6 +32,7 @@ type Server struct {
 	logger *slog.Logger
 	db     *gorm.DB
 	users  *user.Service
+	rooms  *room.Service
 	tokens *auth.Tokens
 	limit  *authLimiter
 	// 请求处理和退出流程会同时访问状态，使用原子变量避免并发读写冲突。
@@ -38,14 +40,14 @@ type Server struct {
 }
 
 // New 使用已校验的配置组装 HTTP 服务；开始监听由入口调用 Spin 完成。
-func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Service, tokens *auth.Tokens) *Server {
+func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Service, rooms *room.Service, tokens *auth.Tokens) *Server {
 	hertzServer := server.New(
 		server.WithHostPorts(cfg.HTTPAddr),
 		// 标准网络实现会返回监听错误，使端口冲突能由入口统一处理。
 		server.WithTransport(standard.NewTransporter),
 		server.WithHandleMethodNotAllowed(true),
 		server.WithExitWaitTime(cfg.ShutdownTimeout),
-		// 当前只接收小型 JSON 请求，限制认证请求占用的内存和读等待。
+		// 当前只接收小型 JSON 请求，限制业务请求占用的内存和读等待。
 		server.WithMaxRequestBodySize(8*1024),
 		server.WithReadTimeout(5*time.Second),
 	)
@@ -54,6 +56,7 @@ func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Servic
 		logger: logger,
 		db:     db,
 		users:  users,
+		rooms:  rooms,
 		tokens: tokens,
 		limit:  &authLimiter{counts: make(map[string]int)},
 	}
@@ -67,6 +70,11 @@ func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Servic
 	accounts.POST("/register", apiServer.register)
 	accounts.POST("/login", apiServer.login)
 	api.GET("/users/me", apiServer.authenticate, apiServer.currentUser)
+	roomsAPI := api.Group("/rooms", apiServer.authenticate)
+	roomsAPI.POST("", apiServer.createRoom)
+	roomsAPI.GET("", apiServer.listRooms)
+	roomsAPI.GET("/:id", apiServer.getRoom)
+	roomsAPI.POST("/:id/close", apiServer.closeRoom)
 	return apiServer
 }
 

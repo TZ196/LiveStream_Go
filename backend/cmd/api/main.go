@@ -16,6 +16,7 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
 	"github.com/TZ196/LiveStream_Go/backend/internal/httpserver"
 	"github.com/TZ196/LiveStream_Go/backend/internal/logging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 )
 
@@ -80,7 +81,9 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return errors.Join(err, database.Close(db))
 	}
 	tokens := auth.NewTokens(cfg.JWTSecret)
-	apiServer := httpserver.New(cfg, logger, db, userService, tokens)
+	roomRepository := room.NewRepository(db)
+	roomService := room.NewService(roomRepository)
+	apiServer := httpserver.New(cfg, logger, db, userService, roomService, tokens)
 
 	// Hertz 会调用这个函数等待运行错误或停止信号。
 	// Spin 不直接返回错误，因此需要保存监听失败的原因。

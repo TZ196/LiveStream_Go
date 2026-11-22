@@ -1,6 +1,6 @@
 # LiveStream 数据模型与存储设计
 
-基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。P1b 首步已实现 users 与迁移版本表，其余业务表和 Redis 键仍为后续设计；实际执行结果见 [项目状态](status.md)。
+基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms 与迁移版本表，事件表和 Redis 键仍为后续设计；实际执行结果见 [项目状态](status.md)。
 
 ## 通用约定
 
@@ -86,16 +86,17 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 | --- | --- | --- |
 | 1 | [000001_create_users.go](../backend/migrations/000001_create_users.go) 使用固定 userV1 模型与 Migrator.CreateTable 建立 users | 无成功版本且不存在 users；完成后登记 1，不复用未来会变化的业务模型 |
 | 2 | [000002_tighten_username_check.go](../backend/migrations/000002_tighten_username_check.go) 通过 GORM.Exec 原子替换用户名 CHECK | 已成功执行 1；校验长度、字母开头及非法字符，完成后登记 2 |
+| 3 | [000003_create_live_rooms.go](../backend/migrations/000003_create_live_rooms.go) 使用固定 roomV3 建立 live_rooms、两项组合索引、房主外键和状态 CHECK | 已成功执行 2；只新增房间表，保留用户与旧成功记录，完成后登记 3 |
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
-当前工作区只保留上述 Go 迁移文件。独立命令兼容此前 SQL 阶段留下的同一份成功记录：已有版本 1 只执行 2，已有版本 2 不再执行结构变更。本轮没有恢复旧 SQL 文件，也没有修改迁移步骤或数据库版本。
+当前工作区只保留上述 Go 迁移文件。独立命令兼容此前 SQL 阶段留下的同一份成功记录：已有版本 1 执行 2、3，已有版本 2 只执行 3，已有版本 3 不再执行结构变更。历史迁移文件未改写。版本 3 无自动删表回滚；建表已生效但登记失败时核对实际结构后受控修复，后续结构调整使用新版本前向修复。旧 API 要求版本 2，数据库升级后需同时使用 P2 API。
 
 命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
 
 MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体回滚的事务。失败或中断后先检查实际表、约束与成功记录：若某步未生效，修复原因后重试；若 DDL 已生效而记录未写入，须依据该版本逐项核对并完成受控修复后再恢复迁移。命令不会自动接管无版本的已有表、补写版本或回滚删表。不能通过强写版本号、重复整份旧 SQL 或删库重建掩盖失败。[MySQL 隐式提交说明](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)
 
-当前 API 要求成功记录连续且最新版本恰好为 2，并检查 users 所需列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
+当前 API 要求成功记录连续且最新版本恰好为 3，并检查 users、live_rooms 所需列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
 
 按 P1b 用户、P2 房间、P6 事件及恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/schema.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
 

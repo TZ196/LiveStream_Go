@@ -41,6 +41,8 @@ RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房
 
 当前 P1b 在 cmd/api 中组装 GORM → User Repository → User Service，并创建独立的 JWT 签发/校验组件，随后传入 HTTP 模块。Handler 负责 JSON 校验与错误映射；Service 完成密码校验后，登录 Handler 使用令牌组件签发 JWT。当前用户 Handler 只使用中间件验签得到的身份调用 Service。前端登录后实际查询 users/me，再展示账号；退出仅清理页面内存。调用顺序和失败路径见 [第五步学习记录](learning/05-user-authentication.md)。
 
+P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 负责读取登录身份，Service 检查房主权限，Repository 以条件更新保证重复关闭不改写时间；列表按 ID 游标查询。房间详情目前只走 HTTP，尚未建立 RoomHub 或实时连接，关闭与在途发送的协调仍按领域规则后续实现。见 [第六步学习记录](learning/06-room-management.md)。
+
 参考实现中 Manager 的外部 I/O 可拖住连接注册和注销，见 [审查 ISSUE-05](reviews/live-stream-danmaku-review.md)。消息分发层只解析和校验传输 DTO，再调用业务 Service；数据库 Model 不直接承担 WS 请求或事件契约。外部发布在房间锁之外执行，并受取消、超时和并发预算约束。
 
 ## 目标目录

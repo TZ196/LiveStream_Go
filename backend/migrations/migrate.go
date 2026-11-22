@@ -82,6 +82,8 @@ func applyPending(db *gorm.DB, logger *slog.Logger) error {
 			err = createUsersV1(db)
 		case 2:
 			err = tightenUsernameV2(db)
+		case 3:
+			err = createLiveRoomsV3(db)
 		default:
 			err = fmt.Errorf("版本 %d 尚未定义迁移步骤", version)
 		}

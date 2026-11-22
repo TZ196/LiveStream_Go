@@ -95,18 +95,20 @@ RoomStats 的以上字段均存在。P3 尚无点赞或投影恢复期间，like
 | 501 | CAPABILITY_NOT_ENABLED | 当前阶段尚未交付该能力 |
 | 500 | INTERNAL_ERROR | 保留 trace_id，不返回内部堆栈 |
 
+P2 已实现创建、列表、详情、关闭四个房间接口，均要求 Bearer 认证；输入未知字段、重复查询参数和非法 ID 被拒绝。房间票据、统计和历史接口仍为后续阶段契约。
+
 数据库、Redis 故障不得返回 200 加伪造成功值。历史功能在 P6 之前明确返回 CAPABILITY_NOT_ENABLED。握手票据错误对应的握手响应见 WebSocket 协议。
 
 ## 运维接口
 
 GET /healthz 返回 200、JSON 响应 {"status":"ok"} 和 Cache-Control: no-store，仅检查进程能否响应，不访问中间件。不支持的方法返回 405。
 
-GET /readyz 返回 JSON 和 Cache-Control: no-store。当前 P1b 数据库接入后的响应字段如下：
+GET /readyz 返回 JSON 和 Cache-Control: no-store。当前 P2 数据库接入后的响应字段如下：
 
 | 字段 | 当前含义 |
 | --- | --- |
 | status | starting、ready、not_ready 或 stopping；仅 ready 返回 200，其余返回 503 |
-| stage | 固定为 P1b，表示正在实现的阶段，不代表注册登录已完成 |
+| stage | 固定为 P2，表示房间管理阶段，不代表实时连接或点赞已完成 |
 | dependencies | 仅包含 mysql：未检查为 not_checked，查询和版本检查通过为 ready，失败为 unavailable；不包含未接入的 Redis、Kafka |
 | recovery | not_applicable；本阶段没有投影恢复链路 |
 
