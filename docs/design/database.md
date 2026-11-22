@@ -67,20 +67,18 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 | projection:{epoch}:session:{session_id} | Hash，room_id、likes、revision、initialized | 不过期；已结束场次也保留；场次身份需从权威数据校验 |
 | projection:{epoch}:processed:{event_id} | String，已处理标记及指纹 | 首次处理起 9 天，重复不延长 |
 | projection:{epoch}:partition:{partition_id} | String，next_offset | 不过期；随投影原子更新 |
-| request:{user_id}:{request_id} | Hash，指纹、原 room_id/session_id、事件类型、event_id、状态、租约及确认时间；不提前修改点赞计数 | request_id 时间加 26 小时的绝对过期点 |
 | ratelimit:danmaku:{user_id}:{window} | String，固定窗口计数 | 10 秒窗口结束后再保留 10 秒 |
-| ratelimit:like:{user_id}:{window} | String，固定窗口计数 | 同上 |
 | ratelimit:auth:{ip_hash}:{window} | String，登录注册计数 | 60 秒窗口结束后再保留 60 秒；P4 可接入 |
 
-业务固定窗口按服务端 UTC 时间计算。新弹幕每用户每 10 秒最多 10 次，点赞最多 20 次；同一请求的重试先走幂等查询，不再次消耗业务额度。恶意重复帧仍受连接容量及消息大小约束。
+业务固定窗口按服务端 UTC 时间计算。新弹幕每用户每 10 秒最多 10 次，点赞最多 20 次；点赞入口不得依赖 Redis 请求登记或 Redis 限流；无状态去重时重复请求也可能消耗限流额度，具体限制须在接入前验证。恶意重复帧仍受连接容量及消息大小约束。
 
-请求创建、指纹比较、租约竞争与更新使用原子脚本；事件标记、计数、revision、分区进度在另一个原子操作中完成。脚本只处理当前请求或事件，不在脚本中遍历全库。使用 Redis 7 standalone，设置 noeviction，启用 AOF everysec 和持久卷，但不将 AOF 等同于零丢失保证。
+消费端以原子脚本比较事件指纹，并更新事件标记、计数、revision 和分区进度。脚本只处理当前请求或事件，不在脚本中遍历全库。使用 Redis 7 standalone，设置 noeviction，启用 AOF everysec 和持久卷，但不将 AOF 等同于零丢失保证。
 
-握手票据、连接数和 RoomHub 不写入 Redis。密码、JWT 密钥不写入 Redis；请求记录包含用户业务文本，应与数据库一起限制访问。
+握手票据、连接数和 RoomHub 不写入 Redis。密码、JWT 密钥不写入 Redis。
 
 ## 容量及清理
 
-9 天去重窗口约需每秒首次事件数乘 777600 个标记，26 小时请求记录保存最小身份、指纹及状态（不保存点赞累计值）。P4/P5 必须测量实际键大小、可用内存和拒绝阈值，不能只根据消息速率假设可以无限缓存。
+9 天去重窗口约需每秒首次事件数乘 777600 个标记。P4/P5 必须测量实际键大小、可用内存和拒绝阈值，不能只根据消息速率假设可以无限缓存。
 
 达到内存预算时先拒绝新准入，已接受事件暂停消费等待资源恢复；禁止淘汰幂等键来换取吞吐。更换为有界分区快照等方案属于后续设计变更。
 

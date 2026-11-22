@@ -18,7 +18,7 @@ P3 场次模型启用后，票据和已连接状态绑定 user_id、room_id、se
 
 使用 UTF-8 文本 JSON 帧，拒绝非法 UTF-8，不接收二进制业务帧。version 必须为 1；客户端消息只接受定义的字段。单消息最多 8 KiB，超出使用关闭码 1009。弹幕不接受 NUL 和除制表符、换行外的控制字符；文本只作为文本渲染。
 
-业务 request_id 为规范小写 UUIDv7，由客户端在消息产生时生成并保留；事件时间从该 ID 提取，客户端时钟需满足校验窗口。同一次动作重试必须保留 request_id、session_id、消息类型和 data，不合并后续点击。DANMAKU.data 只有 content；LIKE.data 为 {}，固定 +1，不接收 count。room_id 来自连接；客户端传入原始 session_id 以保证重试不意外改绑，服务端验证其来源与授权，不能仅因客户端提供就信任。场次已结束或更换后，只能依据有效请求登记受控处理该旧场的既有请求，不得把它当成新场点赞。
+业务 request_id 为规范小写 UUIDv7，由客户端在消息产生时生成并保留；事件时间从该 ID 提取，客户端时钟需满足校验窗口。同一次动作重试必须保留 request_id、session_id、消息类型和 data，不合并后续点击。DANMAKU.data 只有 content；LIKE.data 为 {}，固定 +1，不接收 count。room_id 来自连接；客户端传入原始 session_id 以保证重试不意外改绑，服务端验证其来源与授权，不能仅因客户端提供就信任。场次结束后的旧请求不能改绑新场；没有请求登记时无法判断旧请求是否曾准入，安全处理仍待设计。
 
 ```json
 {
@@ -58,7 +58,7 @@ P3 场次模型启用后，票据和已连接状态绑定 user_id、room_id、se
 }
 ```
 
-ACK 只表示当前阶段的接受边界已满足；P3 弹幕为 memory，P4 点赞和 P5 弹幕为 kafka，见开发计划。重复请求返回相同 event_id 和首次已知接受时间；恢复后无法取得原 ACK 时间时允许 accepted_at=null，但事件身份保持不变。
+ACK 只表示当前阶段的接受边界已满足；P3 弹幕为 memory，P4 点赞和 P5 弹幕为 kafka，见开发计划。重复请求返回相同 event_id；没有请求登记时无法保证首次接受时间一致，accepted_at 可以为 null。
 
 Kafka 结果不确定时不向前端发送包含 Kafka 确认丢失细节或 RESULT_UNKNOWN 的消息，也不伪造成功或明确失败；服务端在预算内使用相同事件有界重试，前端未收到 ACK 时保留原请求并按有限重试规则处理，不把后续点击并入旧请求。重试耗尽仍无结果时停止自动重发；后台保留诊断。长期未确认的安全查询或处理机制需在上线前确定，不得假定消息未发生。
 
@@ -66,7 +66,7 @@ Kafka 结果不确定时不向前端发送包含 Kafka 确认丢失细节或 RES
 
 | code | outcome | 客户端行为 |
 | --- | --- | --- |
-| INVALID_ARGUMENT、UNSUPPORTED_MESSAGE、REQUEST_CONFLICT | rejected | 不自动重试；修改内容属于新的用户动作 |
+| INVALID_ARGUMENT、UNSUPPORTED_MESSAGE | rejected | 不自动重试；修改内容属于新的用户动作 |
 | CLOCK_SKEW | rejected | 校正客户端时间，禁止自动修改未知操作的 ID |
 | REQUEST_EXPIRED | rejected | 仅能证明从未接受时返回；无法确定历史结果时后台保留未确认并停止自动重发，不对前端发送未知结果 |
 | ROOM_CLOSED、ROOM_NOT_FOUND、AUTH_EXPIRED | rejected | 离开房间或重新认证 |
@@ -74,7 +74,7 @@ Kafka 结果不确定时不向前端发送包含 Kafka 确认丢失细节或 RES
 | REQUEST_IN_PROGRESS | pending | 原请求等待 1 秒后重试 |
 | CAPABILITY_NOT_ENABLED | rejected | 当前阶段隐藏未交付操作 |
 
-outcome 描述当前业务动作的已知结果，不只描述本次网络尝试。请求记录不可读、已丢失或已过期时，不能因本次未执行就宣称原操作从未发生；不得将 Kafka 内部的 UNKNOWN 原样返回前端，安全的长期处理方式待设计。REQUEST_CONFLICT 拒绝的是不同内容的请求，不撤销原操作。
+outcome 描述当前业务动作的已知结果，不只描述本次网络尝试。不能因本次未执行就宣称原操作从未发生；不得将 Kafka 内部的 UNKNOWN 原样返回前端，安全的长期处理方式待设计。相同 ID 的不同内容无法在发布前直接判定冲突。
 
 ## 服务端消息
 

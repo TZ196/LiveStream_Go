@@ -40,7 +40,7 @@ schema_version=1，event_type 仅允许 DANMAKU_SENT 与 LIKE_CLICKED。JSON 字
   "event_id": "a61f1c41-7c5f-514d-acb9-c9a4f6b3241a",
   "event_type": "DANMAKU_SENT",
   "request_id": "01a1edab-7800-7abc-8000-123456789abc",
-  "request_hash": "3fb4296c0fe7bf3b4023b95209c438037e813614a4c5cddf411e5ab116dd2e58",
+  "request_hash": "ecd30c445c055a7e20f764bee1ef421ca18ecd1bcd8a92ff5b61e355f97e0fd2",
   "room_id": "1001",
   "session_id": "3001",
   "user_id": "2001",
@@ -55,7 +55,7 @@ schema_version=1，event_type 仅允许 DANMAKU_SENT 与 LIKE_CLICKED。JSON 字
   "event_id": "2b986e4f-c298-5d56-b6d8-b7ba5b5b8c66",
   "event_type": "LIKE_CLICKED",
   "request_id": "01a1edab-7801-7abc-8000-123456789abc",
-  "request_hash": "f48f1711512f389cbf2aed49a7b81d07653fe8c7c9aa0c5f2f4639142dcee8d0",
+  "request_hash": "34b33ca494a51b00fdf52cb1baf61ed8d19b7637a4e8feab9f9f07ce18bc5493",
   "room_id": "1001",
   "session_id": "3001",
   "user_id": "2001",
@@ -70,7 +70,7 @@ schema_version=1，event_type 仅允许 DANMAKU_SENT 与 LIKE_CLICKED。JSON 字
 
 ## 接受与消费
 
-Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写入。一个应用请求可能对应多条同 event_id 的日志记录，两个消费者组都必须业务去重。
+Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写入。一个应用请求可能对应多条同 event_id 的日志记录，两个消费者组都必须业务去重。发布前不使用 Redis 登记请求；相同 ID 不同内容的冲突只能在消费时发现，不同房间可能分属不同分区、导致两组先见版本不同，须暂停并核对。
 
 | 消费组 | 成功处理边界 | 位移提交 |
 | --- | --- | --- |
@@ -96,3 +96,5 @@ Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写�
 P4 对格式、版本、指纹或业务永久约束错误先暂停受影响分区并告警，不提交未处理位置；P6 交付 failed_events 后，Worker 才能按可靠性规则可靠隔离并推进。该表是 V1 的持久死信存储；正常的数据库不可用不转成坏消息。实时消费者遇到异常记录暂停并暴露错误，修复和恢复见 [可靠性设计](reliability.md)。
 
 Kafka 记录、检查点、Redis 投影和 MySQL 历史的保留与清理必须作为同一设计评审，不能单独缩短某一保留期。
+
+后续可通过 k6 测量实际重复消息比例及消费者 lag，再评估是否需要额外优化；当前不引入发布前请求登记。
