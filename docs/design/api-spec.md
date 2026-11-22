@@ -4,7 +4,7 @@
 
 ## 通用约定
 
-业务接口路径前缀为 /api/v1，JSON 使用 UTF-8。user_id、room_id、记录 id、like_count 和递增版本号均为十进制字符串，避免 JavaScript 整数精度丢失；ID 为无前导零的正整数，计数和版本可为 "0"。online_count、limit 和持续秒数为整数。HTTP 时间为 UTC RFC 3339，固定毫秒精度。
+业务接口路径前缀为 /api/v1，JSON 使用 UTF-8。user_id、room_id、session_id、记录 id、like_count 和递增版本号均为十进制字符串，避免 JavaScript 整数精度丢失；ID 为无前导零的正整数，计数和版本可为 "0"。online_count、limit 和持续秒数为整数。HTTP 时间为 UTC RFC 3339，固定毫秒精度。
 
 业务接口成功响应为 {"data": ... , "trace_id": "..."}。错误响应为 {"error": {"code": "...", "message": "...", "retryable": false}, "trace_id": "..."}。trace_id 是诊断标识，不是业务幂等键。输入不接受未定义字段。运维探针使用下文定义的独立响应。
 
@@ -46,7 +46,7 @@
 | GET /api/v1/rooms/{id}/danmaku | limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | P6 起；已落库数据按 id 倒序 |
 | GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
 
-User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、room_id、user_id、username、content、created_at；username 是发送时快照，created_at 是事件时间。
+User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照，created_at 是客户端 request_id 提供并经窗口校验的事件时间，不是可信的服务端接收时间。
 
 创建房间未提供 HTTP 幂等键，前端禁止重复点击和自动重发。结果未知时先刷新本人房间列表进行确认，不能将网络超时直接解释为创建失败。弹幕与点赞的幂等协议仅适用于 WebSocket 业务请求。
 
@@ -66,6 +66,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 {
   "data": {
     "room_id": "1001",
+    "session_id": "3001",
     "online_count": 2,
     "like_count": "12",
     "likes_available": true,
@@ -79,7 +80,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 }
 ```
 
-RoomStats 的以上字段均存在。P3 尚无点赞或投影恢复期间，like_count、projection_epoch、likes_revision 为 null，likes_available=false，在线数仍可返回；前端显示“统计暂不可用”。已初始化的零计数返回字符串 "0" 和有效投影版本。
+RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like_count 指向同一指定场次，旧场统计不可直接并入新场。当前接口及场次模型均未实现。P3 尚无点赞或投影恢复期间，like_count、projection_epoch、likes_revision 为 null，likes_available=false，在线数仍可返回；前端显示“统计暂不可用”。已初始化的零计数返回字符串 "0" 和有效投影版本。
 
 ## 分页
 

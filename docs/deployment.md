@@ -105,7 +105,7 @@ go build ./cmd/api ./cmd/migrate
 
 ## 后续部署阶段
 
-P4 增加 Redis 7 standalone，P5 增加 Apache Kafka（KRaft 单 Broker/Controller），P6 增加 Worker；客户端、镜像补丁版本和资源预算在接入时固定。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
+P4 点赞首版同时增加 Redis 7 standalone、Apache Kafka（KRaft 单 Broker/Controller）及 MySQL Worker；P5 扩展弹幕链路，P6 完善历史与恢复；客户端、镜像补丁版本和资源预算在接入时固定。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
 
 P7 的 Compose 包含 API、Worker、MySQL、Redis、Kafka 五个服务。前端完成类型检查与构建后由 API 同源托管，Worker 镜像不包含前端；backend/Dockerfile 以仓库根目录为构建上下文。页面回退不能覆盖未知 `/api`、`/ws` 错误。公网 TLS、域名与生产运维不属于本阶段。
 
