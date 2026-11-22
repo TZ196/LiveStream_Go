@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前版本为 3：已有版本 2 只增加房间表，已有版本 3 重复执行不改结构。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前版本为 4：版本 3 的数据库会新增场次、点赞及消费记录表；旧 OPEN 房间创建开始时间未知的活动场次。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -63,7 +63,7 @@ npm run dev
 
 登录凭证保存于当前浏览器同源存储，刷新或重新打开页面可恢复，原有 30 分钟有效期不会延长；到期或主动退出后重新登录。同源标签页共享账号和退出状态，测试两个不同账号请使用独立浏览器或隐私窗口。首次更新旧版页面时，原内存凭证没有保存，需要登录一次。
 
-Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。WebSocket 目前只有代理配置，连接业务尚未实现。
+Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。WebSocket 点赞已接入；完整弹幕和在线人数协议仍未交付。
 
 HTTP 客户端请求超时为 5 秒，离开页面取消未完成请求，写请求不自动重试。业务页面不显示开发连接检查，排查服务状态时直接访问 /healthz 和 /readyz；`npm run build` 生成的 dist 不包含开发代理，目前尚未接入 API 静态托管。
 
@@ -105,7 +105,7 @@ go build ./cmd/api ./cmd/migrate
 
 ## 后续部署阶段
 
-P4 增加 Redis 7 standalone，P5 增加 Apache Kafka（KRaft 单 Broker/Controller），P6 增加 Worker；客户端、镜像补丁版本和资源预算在接入时固定。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
+P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；P5 扩展弹幕链路，P6 完善历史与恢复。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
 
 P7 的 Compose 包含 API、Worker、MySQL、Redis、Kafka 五个服务。前端完成类型检查与构建后由 API 同源托管，Worker 镜像不包含前端；backend/Dockerfile 以仓库根目录为构建上下文。页面回退不能覆盖未知 `/api`、`/ws` 错误。公网 TLS、域名与生产运维不属于本阶段。
 
@@ -113,9 +113,28 @@ P7 的 Compose 包含 API、Worker、MySQL、Redis、Kafka 五个服务。前端
 | --- | --- | --- |
 | API | 127.0.0.1:8080 | api-server:8080 |
 | MySQL | 127.0.0.1:3306，冲突时改为 13306 | mysql:3306 |
-| Redis | 127.0.0.1:6379 | redis:6379 |
+| Redis | 127.0.0.1:16379 | redis:6379 |
 | Kafka | 127.0.0.1:9092 | kafka:29092 |
 
 Kafka 需要分别公布宿主和容器客户端地址，并配置独立 Controller 端口；只映射端口不足以保证元数据返回后的连接。V1 中间件端口默认绑定回环地址，使用独立持久卷。P7 分别验证内外地址和重启数据保留。
 
 后续引入实时任务时，退出先停止新准入、票据和新消费，按预算等待已接受任务，只提交成功事务及连续位移，未确认发布保留 UNKNOWN。默认总退出预算仍为 30 秒；依赖健康不能替代消费者、投影及数据库的业务就绪检查。
+
+## 本地点赞链路启动（PowerShell）
+
+以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。迁移前备份已有数据库；版本 4 不删除原房间，旧 OPEN 房间的开始时间未知。
+
+```powershell
+docker compose --env-file .env -f deployments/docker/compose.yaml up -d
+Get-Content .env | ForEach-Object {
+  if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+    [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+  }
+}
+Set-Location backend
+go run ./cmd/migrate
+```
+
+迁移成功后在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 检查 API 及实时消费相关依赖，但不检查独立 Worker，需另行确认 Worker 进程和日志。
+
+新场次第一次事件到达实时消费端之前，页面可能显示“暂不可用”，不把缺失 Redis 键直接当成零。Redis/Topic 身份或检查点不一致时服务会停止消费并要求恢复；完整自动投影重建尚未实现。单 Kafka Broker 与 Redis AOF everysec 均不提供零数据丢失保证。

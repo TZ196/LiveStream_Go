@@ -4,7 +4,7 @@
 
 ## 技术边界
 
-HTTP 使用 CloudWeGo Hertz；WebSocket 使用 Gorilla WebSocket，经 Hertz HTTP Adaptor 接入。前端使用 Vue 3、TypeScript、Vite 和 Composition API。MySQL 8.4 保存业务与事件，Redis 7 保存实时投影、限流和请求幂等记录，Kafka 缓冲事件。
+HTTP 使用 CloudWeGo Hertz；WebSocket 使用 Gorilla WebSocket，经 Hertz HTTP Adaptor 接入。前端使用 Vue 3、TypeScript、Vite 和 Composition API。MySQL 8.4 保存业务与事件，Redis 7 保存实时投影及消费去重记录，Kafka 缓冲事件。
 
 MySQL 访问统一使用 GORM。基础设施层由 GORM 创建连接池，再设置容量与管理生命周期；Repository 使用 GORM 完成业务查询和事务，Service 维护业务规则；Hertz 请求对象不进入数据访问层。结构变更通过独立的 GORM 迁移命令按版本执行，执行与恢复边界见 [数据设计](database.md#迁移与版本)。
 
@@ -14,11 +14,11 @@ P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport �
 
 ## 进程和数据流
 
-浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。最终事件流为：API 校验及登记请求 → Kafka live.events → 两个独立消费者组。
+浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。最终事件流为：API 校验请求 → Kafka live.events → 两个独立消费者组。
 
-live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化、消费检查点和异常事件隔离。两组都读取完整事件流。
+live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流。
 
-RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房间的 HTTP 写入由 API 完成。Redis 计数变化仅由当前阶段指定的处理路径执行：P4 直接处理，P5 起由实时消费者处理，禁止同时执行两条路径。
+RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞从 P4 首次交付起以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，禁止 Producer 在发布前直接增加点赞数。发布前不读写 Redis 请求记录；事件时间由客户端 UUIDv7 request_id 确定。
 
 ## 模块责任
 
@@ -32,7 +32,7 @@ RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房
 | Room Service | 房间操作 → 房间状态 | 所有者权限、生命周期、准入锁 | Room Repository、RoomHub |
 | WebSocket Gateway | 票据握手及消息帧 → 已认证命令 | Origin、票据、读写循环、大小与心跳 | User 身份、Room Service、消息 Service |
 | RoomHub | 注册、移除、广播 → 连接队列 | 在线数、慢客户端、连接与房间清理 | 不执行数据库查询或 Kafka 发送 |
-| 消息 Service | 已认证命令 → 接受结果 | 限流、请求幂等、事件封装、发布策略 | 请求记录存储、EventPublisher |
+| 消息 Service | 已认证命令 → 接受结果 | 限流、事件封装、发布策略 | EventPublisher |
 | 实时消费者 | Kafka 事件 → Redis 投影与广播 | 事件校验、投影原子更新、连续位移 | Redis、RoomHub |
 | Worker | Kafka 事件 → MySQL 事务 | inbox 去重、历史记录、检查点、异常事件 | Repository 与数据库事务 |
 | 基础设施层 | 配置 → 客户端及生命周期 | DB、Redis、Kafka 客户端、日志与退出 | 不定义业务权限或协议 |
@@ -54,12 +54,12 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 | backend/cmd/migrate/main.go | 独立运行版本迁移，成功退出 0、失败退出 1 | P1b |
 | backend/internal/httpserver | Hertz 实例、HTTP 路由与探针 Handler | P1a |
 | backend/internal/config、logging | 配置合并与校验、应用日志和框架日志级别 | P1a |
-| backend/cmd/worker/main.go | Worker 组装、启动与关闭 | P6 |
+| backend/cmd/worker/main.go | Worker 组装、启动与关闭 | P4 |
 | backend/internal/user、room | 用户与房间业务 | P1b、P2 |
 | backend/internal/auth | JWT 签发和校验，不依赖 Hertz | P1b |
 | backend/internal/websocket | Gateway、Hub、连接 | P3 |
 | backend/internal/danmaku、interaction | 弹幕与点赞业务 | P3、P4 |
-| backend/internal/messaging | 事件、发布、消费、幂等协调 | P5 |
+| backend/internal/messaging | 事件、发布、消费、幂等协调 | P4 点赞；P5 扩展弹幕 |
 | backend/internal/database、cache、middleware | 数据访问及中间件基础设施 | 随阶段建立 |
 | backend/configs | 无秘密配置样例 | P1a |
 | backend/migrations | 迁移调度与固定版本的 GORM 变更步骤，兼容已有成功记录 | P1b 起 |

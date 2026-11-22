@@ -1,18 +1,18 @@
 # LiveStream Kafka 事件与消费契约
 
-基线 V1.1。Kafka 从 P5 接入，持久化消费者从 P6 接入。接受与恢复规则见 [可靠性设计](reliability.md)。
+基线 V1.1。点赞从 P4 首次交付即接入 Kafka、Redis 实时消费者及 MySQL 持久化消费者；弹幕从 P5 接入 Kafka。接受与恢复规则见 [可靠性设计](reliability.md)。
 
 ## 日志配置
 
 | 项目 | V1 默认值 |
 | --- | --- |
 | 业务 Topic | live.events |
-| Broker、分区、复制因子 | 1、16、1（本地初始设计，P5 创建业务 Topic 前在隔离环境验证） |
+| Broker、分区、复制因子 | 1、16、1（本地初始设计，P4 创建业务 Topic 前在隔离环境验证） |
 | cleanup.policy | delete，不使用 compact |
 | 消息保留期 | 7 天；不另设更短的按大小淘汰限制 |
 | 单条事件大小上限 | 64 KiB；Topic 批次限制同时为 64 KiB，Producer 批次目标不超过 48 KiB，预留协议开销 |
 | 消息 Key | 弹幕：`room_id`；点赞：`room_id:event_id`；均为 UTF-8 字节 |
-| 分区策略 | 固定 Kafka Java 兼容的 murmur2 Key 分区；P5 验证 Go 客户端一致性 |
+| 分区策略 | 固定 Kafka Java 兼容的 murmur2 Key 分区；P4 验证 Go 客户端一致性 |
 | Producer | 幂等启用，acks=all；单 Broker 的 min.insync.replicas=1 |
 | live-realtime | 单 API 进程内消费，各分区按各自顺序处理 |
 | live-persistence | Worker 消费，独立消费进度 |
@@ -30,18 +30,19 @@ schema_version=1，event_type 仅允许 DANMAKU_SENT 与 LIKE_CLICKED。JSON 字
 | event_type | DANMAKU_SENT 或 LIKE_CLICKED |
 | request_id | 原业务 UUIDv7 |
 | request_hash | 原业务指纹的 64 位小写十六进制 SHA-256 |
-| room_id、user_id | 十进制字符串；来自连接及认证 |
-| timestamp | 服务端首次准入时的 Unix 毫秒整数，重试不变 |
+| room_id、session_id、user_id | 十进制字符串；来自认证与服务端校验后的场次绑定 |
+| timestamp | 从客户端生成的 UUIDv7 request_id 解析出的 Unix 毫秒；重试不变，服务端校验允许时间窗口；不等于服务器接收时间 |
 | payload | DANMAKU_SENT 为 content、username；LIKE_CLICKED 为 {} |
 
 ```json
 {
   "schema_version": 1,
-  "event_id": "62eac618-3791-5fc5-b572-a20981c36e6f",
+  "event_id": "a61f1c41-7c5f-514d-acb9-c9a4f6b3241a",
   "event_type": "DANMAKU_SENT",
   "request_id": "01a1edab-7800-7abc-8000-123456789abc",
-  "request_hash": "f549bd6a113a84ecc75b3c2c6d4baa9f86285da8a05730f7f9a87c035aa131fa",
+  "request_hash": "ecd30c445c055a7e20f764bee1ef421ca18ecd1bcd8a92ff5b61e355f97e0fd2",
   "room_id": "1001",
+  "session_id": "3001",
   "user_id": "2001",
   "timestamp": 1794988800000,
   "payload": {"content": "大家好", "username": "alice"}
@@ -51,24 +52,25 @@ schema_version=1，event_type 仅允许 DANMAKU_SENT 与 LIKE_CLICKED。JSON 字
 ```json
 {
   "schema_version": 1,
-  "event_id": "5e808eea-b244-55cc-98f5-c0799dd6c66d",
+  "event_id": "2b986e4f-c298-5d56-b6d8-b7ba5b5b8c66",
   "event_type": "LIKE_CLICKED",
   "request_id": "01a1edab-7801-7abc-8000-123456789abc",
-  "request_hash": "f05a9c93c7267ac34e92a1553729e820c322bbac35880b298baa44ea79458b3d",
+  "request_hash": "34b33ca494a51b00fdf52cb1baf61ed8d19b7637a4e8feab9f9f07ce18bc5493",
   "room_id": "1001",
+  "session_id": "3001",
   "user_id": "2001",
   "timestamp": 1794988800001,
   "payload": {}
 }
 ```
 
-事件冻结后重试使用原序列化内容。username 是首次准入时的已验证用户快照；不在消费者为每条弹幕同步查询用户名。弹幕 Key 为事件中规范十进制 `room_id`；点赞 Key 为该 `room_id`、半角冒号 `:` 和规范小写 `event_id` 的拼接。例如 `1001:5e808eea-b244-55cc-98f5-c0799dd6c66d`。消费者根据事件类型重建并校验 Key，不一致按异常事件处置。客户端 UUIDv7 `request_id` 与服务端确定性 UUIDv5 `event_id` 仍遵循可靠性设计，不改为客户端 UUIDv4。
+事件由原 request_id 的时间与同一业务内容确定，重试使用相同规范化序列化内容；这不是服务器首次接收时间。点赞固定 +1，不接收批次 count。username 是首次准入时的已验证用户快照；不在消费者为每条弹幕同步查询用户名。弹幕 Key 为事件中规范十进制 `room_id`；点赞 Key 为该 `room_id`、半角冒号 `:` 和规范小写 `event_id` 的拼接。例如 `1001:2b986e4f-c298-5d56-b6d8-b7ba5b5b8c66`。消费者根据事件类型重建并校验 Key，不一致按异常事件处置。客户端 UUIDv7 `request_id` 与服务端确定性 UUIDv5 `event_id` 仍遵循可靠性设计，不改为客户端 UUIDv4。
 
 请求的 24 小时时间窗口用于发布准入，不用于拒绝已进入 Kafka 的延迟消费事件。消费者重算 request_hash 与 event_id 并检查外壳，不能因为 Worker 积压就丢弃旧事件。
 
 ## 接受与消费
 
-Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写入。一个应用请求可能对应多条同 event_id 的日志记录，两个消费者组都必须业务去重。
+Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写入。一个应用请求可能对应多条同 event_id 的日志记录，两个消费者组都必须业务去重。发布前不使用 Redis 登记请求；相同 ID 不同内容的冲突只能在消费时发现，不同房间可能分属不同分区、导致两组先见版本不同，须暂停并核对。
 
 | 消费组 | 成功处理边界 | 位移提交 |
 | --- | --- | --- |
@@ -89,8 +91,10 @@ Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写�
 
 此设计缓解 Kafka 单房间点赞 Key 热点，不保证 16 分区都由不同 Worker 并行处理，也不保证整体吞吐达到任何目标。单 Broker、单 Redis 实例及同房间计数/revision 的原子更新、RoomHub 广播和 MySQL 均可能成为下一瓶颈；先按验收计划测量，再决定是否设计 Redis 计数分片。弹幕仍按房间有序，单个极热房间的弹幕仍可能形成分区热点。点赞与弹幕共用 Topic 和分区，点赞也可能与弹幕竞争相同分区资源；分片不提供流量隔离，须测量弹幕延迟。
 
-本地旧项目的 `live.like` 16 分区实验是独立验证，不等同于此处 `live.events`、UUIDv5 和 murmur2 契约已实现或验证。P5 创建 Topic 前固定最终分区数；运行中的 Topic 不得为扩消费者数直接扩分区或换算法，必须先设计迁移与恢复。
+本地旧项目的 `live.like` 16 分区实验是独立验证，不等同于此处 `live.events`、UUIDv5 和 murmur2 契约已实现或验证。P4 创建 Topic 前固定最终分区数；运行中的 Topic 不得为扩消费者数直接扩分区或换算法，必须先设计迁移与恢复。
 
-格式、版本、指纹或业务永久约束错误由 Worker 记录到 MySQL failed_events。该表是 V1 的持久死信存储；正常的数据库不可用不转成坏消息。实时消费者遇到异常记录暂停并暴露错误，修复和恢复见 [可靠性设计](reliability.md)。
+P4 对格式、版本、指纹或业务永久约束错误先暂停受影响分区并告警，不提交未处理位置；P6 交付 failed_events 后，Worker 才能按可靠性规则可靠隔离并推进。该表是 V1 的持久死信存储；正常的数据库不可用不转成坏消息。实时消费者遇到异常记录暂停并暴露错误，修复和恢复见 [可靠性设计](reliability.md)。
 
 Kafka 记录、检查点、Redis 投影和 MySQL 历史的保留与清理必须作为同一设计评审，不能单独缩短某一保留期。
+
+后续可通过 k6 测量实际重复消息比例及消费者 lag，再评估是否需要额外优化；当前不引入发布前请求登记。
