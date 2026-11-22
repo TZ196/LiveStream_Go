@@ -21,6 +21,10 @@
 
 历史业务验证见 [P1a](verification/reports/p1a.md)、[P1b](verification/reports/p1b.md)、[P2](verification/reports/p2.md)。部分临时脚本和原始结果已不存在，报告标注了证据边界；本轮文档整理不作为业务复测。
 
+## 设计更新
+
+点赞事件拟按 `room_id:event_id` 分散至 16 分区，弹幕仍按房间分区保序；Kafka 与相关验证尚未实现。单节点 Redis、Broker 和广播仍须测量，关闭后最终完成屏障仍待设计。详见 [Kafka 契约](design/kafka-events.md)。
+
 ## 待解决问题
 
 | 编号 | 问题 | 后续落实与验收 |

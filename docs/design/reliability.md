@@ -40,7 +40,7 @@ ACK 不保证广播或落库；广播不必等待 ACK 写入连接。客户端�
 
 ## Redis 实时投影
 
-实时消费者按分区顺序处理。一个短 Lua 操作完成事件标记检查、首次 LIKE 的计数和 revision 增加、必要的房间投影初始化检查，以及该分区 Redis next_offset 更新。禁止先 SET 去重标记、后单独 INCR。脚本原子执行能力见 [Redis Lua 文档](https://redis.io/docs/latest/develop/programmability/eval-intro/)。
+实时消费者按各分区顺序处理；同一房间的点赞可能由不同分区交错到达。一个短 Lua 操作完成事件标记检查、首次 LIKE 的计数和 revision 增加、必要的房间投影初始化检查，以及该分区 Redis next_offset 更新。同一 Redis standalone 实例对这些脚本串行执行，计数和 revision 的单调性以实际原子提交顺序为准，不依赖 Kafka 跨分区顺序。禁止先 SET 去重标记、后单独 INCR。脚本原子执行能力见 [Redis Lua 文档](https://redis.io/docs/latest/develop/programmability/eval-intro/)。
 
 脚本先校验键类型、计数格式和溢出边界再执行写入。脚本报错或调用结果未知时不假定数据已全部回滚：暂停该投影并核对状态，无法证明完整时进入恢复，不对可能部分完成的操作盲目重试。
 

@@ -7,14 +7,14 @@
 | 项目 | V1 默认值 |
 | --- | --- |
 | 业务 Topic | live.events |
-| Broker、分区、复制因子 | 1、3、1 |
+| Broker、分区、复制因子 | 1、16、1（本地初始设计，P5 创建业务 Topic 前在隔离环境验证） |
 | cleanup.policy | delete，不使用 compact |
 | 消息保留期 | 7 天；不另设更短的按大小淘汰限制 |
 | 单条事件大小上限 | 64 KiB；Topic 批次限制同时为 64 KiB，Producer 批次目标不超过 48 KiB，预留协议开销 |
-| 消息 Key | room_id 十进制字符串的 UTF-8 字节 |
+| 消息 Key | 弹幕：`room_id`；点赞：`room_id:event_id`；均为 UTF-8 字节 |
 | 分区策略 | 固定 Kafka Java 兼容的 murmur2 Key 分区；P5 验证 Go 客户端一致性 |
 | Producer | 幂等启用，acks=all；单 Broker 的 min.insync.replicas=1 |
-| live-realtime | 单 API 进程内消费，三个分区按各自顺序处理 |
+| live-realtime | 单 API 进程内消费，各分区按各自顺序处理 |
 | live-persistence | Worker 消费，独立消费进度 |
 
 保留 Kafka 集群和 Topic 身份，禁止运行中删除重建 Topic、扩分区或更换 Key 算法。此类操作会改变恢复依据或房间分区，需要迁移设计。单节点 acks=all 不提供多副本容灾能力。
@@ -62,7 +62,7 @@ schema_version=1，event_type 仅允许 DANMAKU_SENT 与 LIKE_CLICKED。JSON 字
 }
 ```
 
-事件冻结后重试使用原序列化内容。username 是首次准入时的已验证用户快照；不在消费者为每条弹幕同步查询用户名。topic Key 必须与事件 room_id 一致。
+事件冻结后重试使用原序列化内容。username 是首次准入时的已验证用户快照；不在消费者为每条弹幕同步查询用户名。弹幕 Key 为事件中规范十进制 `room_id`；点赞 Key 为该 `room_id`、半角冒号 `:` 和规范小写 `event_id` 的拼接。例如 `1001:5e808eea-b244-55cc-98f5-c0799dd6c66d`。消费者根据事件类型重建并校验 Key，不一致按异常事件处置。客户端 UUIDv7 `request_id` 与服务端确定性 UUIDv5 `event_id` 仍遵循可靠性设计，不改为客户端 UUIDv4。
 
 请求的 24 小时时间窗口用于发布准入，不用于拒绝已进入 Kafka 的延迟消费事件。消费者重算 request_hash 与 event_id 并检查外壳，不能因为 Worker 积压就丢弃旧事件。
 
@@ -85,7 +85,11 @@ Producer 成功回调是 Kafka 阶段 ACK 的依据；超时不等于没有写�
 
 ## 顺序与异常事件
 
-同一房间在分区数及分区策略不变时进入同一分区，按日志顺序广播。不同房间不要求全局顺序；分区顺序也不意味着终端之间的时钟顺序。LIKE_UPDATE 使用投影版本，不能仅依靠到达时间覆盖界面计数。
+同一房间的弹幕在分区数及分区策略不变时进入同一分区，按该分区日志顺序广播；这不是浏览器墙钟时间的全序。点赞按事件级 Key 分散，同一房间不同点赞可进入不同分区；点赞之间以及点赞与弹幕之间不保证全局顺序。相同事件重试沿用冻结的 event_id 与 Key，分区数和算法不变时进入同一分区；仍可能产生多条记录，两个消费者必须分别按 event_id 幂等。点赞采用累加，`LIKE_UPDATE` 使用投影版本，不能仅靠到达时间覆盖界面计数。
+
+此设计缓解 Kafka 单房间点赞 Key 热点，不保证 16 分区都由不同 Worker 并行处理，也不保证整体吞吐达到任何目标。单 Broker、单 Redis 实例及同房间计数/revision 的原子更新、RoomHub 广播和 MySQL 均可能成为下一瓶颈；先按验收计划测量，再决定是否设计 Redis 计数分片。弹幕仍按房间有序，单个极热房间的弹幕仍可能形成分区热点。点赞与弹幕共用 Topic 和分区，点赞也可能与弹幕竞争相同分区资源；分片不提供流量隔离，须测量弹幕延迟。
+
+本地旧项目的 `live.like` 16 分区实验是独立验证，不等同于此处 `live.events`、UUIDv5 和 murmur2 契约已实现或验证。P5 创建 Topic 前固定最终分区数；运行中的 Topic 不得为扩消费者数直接扩分区或换算法，必须先设计迁移与恢复。
 
 格式、版本、指纹或业务永久约束错误由 Worker 记录到 MySQL failed_events。该表是 V1 的持久死信存储；正常的数据库不可用不转成坏消息。实时消费者遇到异常记录暂停并暴露错误，修复和恢复见 [可靠性设计](reliability.md)。
 
