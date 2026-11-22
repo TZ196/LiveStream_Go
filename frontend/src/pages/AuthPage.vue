@@ -135,7 +135,7 @@ onBeforeUnmount(() => {
       </form>
       <p v-if="message" class="form-message" :data-kind="messageKind" :role="messageKind === 'error' ? 'alert' : 'status'">{{ message }}</p>
       <p v-if="traceId" class="trace-note">问题编号：{{ traceId }}</p>
-      <p id="account-notice" class="account-notice">登录状态仅保留在当前页面，刷新或关闭页面后需要重新登录。</p>
+      <p id="account-notice" class="account-notice">登录后 30 分钟内保持登录，刷新页面不会退出。使用公共设备时请主动退出登录。</p>
     </section>
   </section>
 </template>

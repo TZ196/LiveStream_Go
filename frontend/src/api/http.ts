@@ -83,7 +83,3 @@ export async function request(path: string, options: RequestOptions): Promise<un
     throw error
   }
 }
-
-export function get(path: string, signal: AbortSignal): Promise<unknown> {
-  return request(path, { signal })
-}

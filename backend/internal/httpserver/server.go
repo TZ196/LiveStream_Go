@@ -75,6 +75,7 @@ func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Servic
 	roomsAPI.GET("", apiServer.listRooms)
 	roomsAPI.GET("/:id", apiServer.getRoom)
 	roomsAPI.POST("/:id/close", apiServer.closeRoom)
+	roomsAPI.POST("/:id/reopen", apiServer.reopenRoom)
 	return apiServer
 }
 

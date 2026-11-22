@@ -196,6 +196,27 @@ func (s *Server) closeRoom(ctx context.Context, c *app.RequestContext) {
 	writeData(c, 200, publicRoom(value))
 }
 
+func (s *Server) reopenRoom(ctx context.Context, c *app.RequestContext) {
+	identity, ok := roomIdentity(c)
+	if !ok {
+		return
+	}
+	id, ok := readRoomID(c)
+	if !ok {
+		return
+	}
+	var input struct{}
+	if !readRoomObject(c, &input) {
+		return
+	}
+	value, err := s.rooms.Reopen(ctx, id, identity.UserID)
+	if err != nil {
+		s.roomError(ctx, c, err)
+		return
+	}
+	writeData(c, 200, publicRoom(value))
+}
+
 func (s *Server) roomError(ctx context.Context, c *app.RequestContext, err error) {
 	switch {
 	case errors.Is(err, room.ErrInvalidTitle), errors.Is(err, room.ErrInvalidList):

@@ -14,7 +14,11 @@
 
 访问令牌为 JWT，算法固定 HS256，校验签名、iss=livestream-api、aud=livestream-browser、sub、iat 和 exp，拒绝客户端选择其他算法。sub 为用户 ID 字符串；iat 和 exp 必须存在，exp 晚于 iat 且二者间隔不超过 30 分钟，允许最多 30 秒时钟偏差。签名密钥使用至少 32 随机字节的标准 Base64 编码，经 LIVESTREAM_JWT_SECRET 注入，无可运行的默认密钥；解码后的字节用于签名。
 
-前端将令牌保存在内存，刷新页面后重新登录；V1 不实现刷新令牌。退出登录清空内存并关闭该页面连接，不宣称已经撤销其他客户端持有的 JWT。过期长连接按 WebSocket 协议关闭。
+前端将访问令牌保存在同源 localStorage，键为 `livestream.access-token`，不保存密码。刷新或重新打开页面时先检查 JWT 的原始 exp，再用 users/me 验证身份；恢复登录不签发新令牌、不重置有效期。前端读取 exp 仅用于界面定时退出，身份、签名和有效期仍由服务端校验。V1 不实现刷新令牌。
+
+退出登录或接口返回 401 时清空内存和本地凭证；同源标签页通过 storage 事件同步退出及账号切换，其他浏览器独立。恢复时网络/数据库故障保留未到期凭证并显示重试入口；损坏或过期凭证清理后重新登录。浏览器禁止存储时允许本页登录并提示无法保持登录。退出不宣称撤销其他客户端持有的 JWT；过期长连接按 WebSocket 协议关闭。
+
+本地开发版沿用 Bearer 接口，以短期凭证持久化满足刷新恢复；没有引入 Cookie 会话或自动续期协议。localStorage 可被同源脚本读取，不能防御 XSS，页面必须保持文本转义，不引入不可信脚本；不得把密码放入存储、URL 或日志。
 
 密码使用 Argon2id，初始参数 m=19456 KiB、t=2、p=1，每条密码独立 16 字节随机盐和 32 字节输出，保存带参数的编码结果；参数可在性能验证后提高。此起点参考 [OWASP 密码存储指南](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。登录失败统一返回 INVALID_CREDENTIALS，日志不保存密码、令牌或原始票据。
 
@@ -24,7 +28,7 @@
 
 当前业务请求预算为 3 秒，MySQL 查询传递该 context；已经开始的 Argon2id 运算会在当前调用内完成，名额在操作结束后释放，不启动脱离请求的计算 goroutine。HTTP 请求体上限 8 KiB，读取超时为 5 秒。请求在 Hertz 协议解析阶段被拒绝时可返回纯文本 400/408/413/431；进入业务 Handler 后统一使用本文 JSON 错误格式。业务响应均设置 Cache-Control: no-store，并返回服务端生成的 X-Trace-ID，与响应及访问日志中的 trace_id 相同。
 
-注册、登录只接受单个 JSON 对象和 username、password 字段，不接受查询参数。注册成功不签发令牌、不自动登录；登录成功后前端用 Bearer 调用 users/me 确认身份。退出只清除当前页面会话，没有服务端 logout 接口或 JWT 撤销表。注册请求超时或网络中断时可能已经写入，前端不自动重发，提示先尝试登录确认结果。
+注册、登录只接受单个 JSON 对象和 username、password 字段，不接受查询参数。注册成功不签发令牌、不自动登录；登录成功后前端用 Bearer 调用 users/me 确认身份。没有服务端 logout 接口或 JWT 撤销表。注册请求超时或网络中断时可能已经写入，前端不自动重发，提示先尝试登录确认结果。
 
 ## 接口清单
 
@@ -36,7 +40,8 @@
 | POST /api/v1/rooms | title | Room，201 | owner_id 来自令牌 |
 | GET /api/v1/rooms | status、owner、limit、cursor | items: Room[]、next_cursor，200 | status 默认 OPEN，可为 CLOSED；owner 可省略或为 me；按 id 倒序 |
 | GET /api/v1/rooms/{id} | 无 | Room，200 | 包含关闭房间 |
-| POST /api/v1/rooms/{id}/close | 空 JSON 对象 | Room，200 | 仅房主；重复关闭返回相同状态及 closed_at |
+| POST /api/v1/rooms/{id}/close | 空 JSON 对象 | Room，200 | 仅房主结束本轮直播；连续重复关闭保留本轮 closed_at |
+| POST /api/v1/rooms/{id}/reopen | 空 JSON 对象 | Room，200 | 仅房主；原房间恢复 OPEN，closed_at=null；已 OPEN 时返回当前房间 |
 | POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path，201 | 仅开放房间；规则见下文 |
 | GET /api/v1/rooms/{id}/danmaku | limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | P6 起；已落库数据按 id 倒序 |
 | GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
@@ -44,6 +49,8 @@
 User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、room_id、user_id、username、content、created_at；username 是发送时快照，created_at 是事件时间。
 
 创建房间未提供 HTTP 幂等键，前端禁止重复点击和自动重发。结果未知时先刷新本人房间列表进行确认，不能将网络超时直接解释为创建失败。弹幕与点赞的幂等协议仅适用于 WebSocket 业务请求。
+
+重新开播保持 id、owner_id、title、created_at，下一次关闭重新设置该轮 closed_at。开播/关闭在事务中对同一房间加行锁，响应表示本次事务完成时的状态，随后仍可能被另一请求改变。连续同方向操作幂等；中间发生反向操作后再次请求代表新操作，不提供跨直播轮次的请求去重。前端不自动重发，结果未知时先刷新详情再操作。
 
 ## 票据接口
 
@@ -95,7 +102,7 @@ RoomStats 的以上字段均存在。P3 尚无点赞或投影恢复期间，like
 | 501 | CAPABILITY_NOT_ENABLED | 当前阶段尚未交付该能力 |
 | 500 | INTERNAL_ERROR | 保留 trace_id，不返回内部堆栈 |
 
-P2 已实现创建、列表、详情、关闭四个房间接口，均要求 Bearer 认证；输入未知字段、重复查询参数和非法 ID 被拒绝。房间票据、统计和历史接口仍为后续阶段契约。
+P2 已实现创建、列表、详情、关闭、重新开播五个房间接口，均要求 Bearer 认证；输入未知字段、重复查询参数和非法 ID 被拒绝。房间票据、统计和历史接口仍为后续阶段契约。
 
 数据库、Redis 故障不得返回 200 加伪造成功值。历史功能在 P6 之前明确返回 CAPABILITY_NOT_ENABLED。握手票据错误对应的握手响应见 WebSocket 协议。
 

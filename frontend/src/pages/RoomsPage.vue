@@ -104,13 +104,13 @@ onBeforeUnmount(() => {
         <input id="room-title" v-model="title" placeholder="给房间起个名字" :disabled="creating" required aria-describedby="room-title-help" />
         <button class="submit-button" type="submit" :disabled="creating">{{ creating ? '正在创建…' : '创建房间' }}</button>
       </div>
-      <p id="room-title-help" class="field-help">1–80 个字符，所有已登录用户都可以查看。</p>
+      <p id="room-title-help" class="field-help">1–80 个字符，所有已登录用户都可以查看。已有房间可在“我的房间”中选择“已结束”后重新开播，无需再次创建。</p>
       <p v-if="createMessage" class="form-message" data-kind="error" role="alert">{{ createMessage }}</p>
     </form>
     <div class="room-filters">
       <div><label for="room-status">房间状态</label>
         <select id="room-status" v-model="filter.status" :disabled="creating" @change="loadRooms()">
-          <option value="OPEN">开放中</option><option value="CLOSED">已关闭</option>
+          <option value="OPEN">直播中</option><option value="CLOSED">已结束</option>
         </select>
       </div>
       <div><label for="room-owner">查看范围</label>
@@ -125,7 +125,7 @@ onBeforeUnmount(() => {
     <p v-else-if="rooms.length === 0 && !listMessage" class="empty-state">当前筛选条件下还没有房间。</p>
     <ul class="room-grid" aria-label="房间列表">
       <li v-for="room in rooms" :key="room.id" class="room-card">
-        <span class="room-badge" :data-status="room.status">{{ room.status === 'OPEN' ? '开放中' : '已关闭' }}</span>
+        <span class="room-badge" :data-status="room.status">{{ room.status === 'OPEN' ? '直播中' : '已结束' }}</span>
         <h2>{{ room.title }}</h2>
         <p class="field-help">房间 {{ room.id }} · {{ room.owner_id === userId ? '我创建的' : `房主 ${room.owner_id}` }}</p>
         <button class="retry-button" type="button" :disabled="creating" @click="selectedId = room.id">查看房间</button>
