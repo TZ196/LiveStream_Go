@@ -47,13 +47,13 @@
 
 REF-01 的单读、单写与 Gorilla 的并发约束一致；同一连接的常规写操作须由应用自行协调，见 [Gorilla 包文档](https://pkg.go.dev/github.com/gorilla/websocket#hdr-Concurrency)。这解释了设计依据，不代表参考项目的所有客户端都已满足该约束。
 
-以下思路保留为后续候选，尚未纳入 V1 实现承诺：
+下表记录了后续候选以及已在点赞链路采用的做法。
 
 | 候选 | 借鉴价值 | 当前处理及再次评估条件 |
 | --- | --- | --- |
 | 多服务器在线数快照与 TTL，`internal/infra/redis.go:95/124` | 用定期快照和过期识别失联实例，避免永久残留计数 | V1 以本 API 有效连接为准；授权多实例设计后再处理实例身份、租约、汇总误差与广播拓扑 |
 | `sync.Pool` 复用连接快照，`internal/ws/manager.go:409` | 高频广播时可能减少分配 | 先测分配与 GC；确认是瓶颈后再引入，归还前清理引用，评估池保留内存和对象所有权 |
-| 合并统计广播，`internal/ws/manager.go:296` | 统计更新密集时降低下行流量 | 仅作为未来协议优化候选；不延迟权威计数到易丢失的内存批次。调整推送频率前评审版本、收敛延迟及前端行为 |
+| 合并统计广播，`internal/ws/manager.go:296` | 统计更新密集时降低下行流量 | 已采用 200 毫秒同场快照。Redis 按每个 Kafka 批次原子计数，内存仅合并已生效的总数展示。[实测](../verification/reports/batched-likes.md) |
 
 ## 问题、触发条件与我们的改进
 
@@ -68,7 +68,7 @@ REF-01 的单读、单写与 Gorilla 的并发约束一致；同一连接的常�
 | ISSUE-05 / 高：连接管理循环包含中间件等待 | `internal/ws/manager.go:110/271` 在主循环中生产及发布；`internal/infra/kafka.go:116` 阻塞发送到 Producer 输入；Redis 发布等待返回 | Kafka 输入拥塞或 Redis 缓慢可拖住注册、注销及断连清理；异步 Producer 不等于调用端永不阻塞 | RoomHub 仅管理连接及分发；准入与发布独立，锁外进行可取消、有超时且有界的外部操作。[架构](../design/architecture.md)，P3 模拟、P5 实链路，WS-05 |
 | ISSUE-06 / 高：Redis 广播与 Kafka 存储独立双写 | `internal/ws/manager.go:271` 分别走两个组件；`internal/infra/kafka.go:46` 不返回成功通知，失败仅记日志 | 可能广播成功但持久化失败，或日志已有而即时广播失败；调用方无法据此判断业务接受结果 | P5 统一 Kafka 事件入口，Broker 成功确认后 ACK，由两个消费组分别处理。仍明确广播尽力、数据库异步及 UNKNOWN 边界。[Kafka 设计](../design/kafka-events.md)、[可靠性设计](../design/reliability.md)，IDEM-03、KAFKA-01 |
 | ISSUE-07 / 高：同房间顺序可能被并发打乱 | `internal/ws/manager.go:135/142` 多个 Worker 共用任务队列；`internal/infra/kafka.go:51/111` 随机分区且未设置房间 Key | 同房间后入队任务可能先发送；多个 Kafka 分区之间没有该房间的统一日志顺序 | 弹幕按 room_id 分区并保持进入连接队列的顺序；点赞按事件分片，不保证与弹幕或其他点赞的全序。不同房间不要求全局有序。[架构](../design/architecture.md)、[Kafka 设计](../design/kafka-events.md)，P3/P5，WS-03 |
-| ISSUE-08 / 高：点赞增量可丢失且缺少业务去重 | `internal/ws/router.go:60` 接受客户端 count；`internal/ws/manager.go:299/318/326` 先换掉累加映射，再仅处理当前活跃房间并异步递增 Redis | 写 Redis 失败、进程退出或房间先变空可能少算；重试可能多算；任意 count 也不符合我们的单次点击语义 | 每个新合法动作增加一次，重试复用身份；P4 原子接受、去重和计数，P5 起实时消费原子投影，P6 才具备完整历史恢复。[领域模型](../design/domain-model.md)、[可靠性设计](../design/reliability.md)，COUNT-01、IDEM-01、REC-01 |
+| ISSUE-08 / 高：点赞增量可丢失且缺少业务去重 | `internal/ws/router.go:60` 接受客户端 count；`internal/ws/manager.go:299/318/326` 先换掉累加映射，再仅处理当前活跃房间并异步递增 Redis | 写 Redis 失败、进程退出或房间先变空可能少算；重试可能多算，缺少稳定事件身份时无法核对批次 | 前端冻结每批 count，服务端校验正整数和请求指纹。Broker 确认后 ACK，两个组按事件身份幂等累加。完整恢复仍在 P6。[领域模型](../design/domain-model.md)、[可靠性设计](../design/reliability.md)，COUNT-01、IDEM-01、REC-01 |
 | ISSUE-09 / 高：慢连接和后台任务缺少完整退出边界 | `internal/ws/client.go:42/80` 未设置消息大小和读写截止时间；`internal/ws/manager.go:156` 队列满只丢消息；`:129` 周期启动任务而无重叠限制，`:110` 无停止分支 | 慢读端可能长期占据写循环；超大输入占用内存；统计变慢可造成任务重叠，退出难以收敛 | 帧、队列、连接和后台并发均设上限；慢连接关闭，任务可取消、可等待回收，采用阶段退出预算。[架构](../design/architecture.md)、[部署设计](../deployment.md)，P3 起 ROOM-03、WS-04、WS-05 |
 | ISSUE-10 / 中：环境与测量依据不足 | `docker-compose.yaml:7/28/35` 使用未锁定镜像标签；`internal/infra/db.go:13` 在源码中定义连接配置；README 指标缺少该副本内的原始测量记录 | 换机器或重新拉镜像难以复现；指标容易被当成普遍容量结论 | 配置由环境注入，镜像及依赖锁定；每项指标保存环境、负载、口径和原始结果。[部署设计](../deployment.md)、[验证设计](../verification/plan.md)，ENV-01、PERF-01、PERF-02 |
 

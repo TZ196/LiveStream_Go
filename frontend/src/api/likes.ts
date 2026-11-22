@@ -13,7 +13,7 @@ export async function getLikeTicket(token: string, roomId: string, signal: Abort
   return { ws_path: result.data.ws_path, session_id: result.data.session_id }
 }
 
-// 每次点击产生一个 UUIDv7；重试始终使用保存在待确认列表中的原值。
+// 每个新批次产生一个 UUIDv7；重试始终使用保存在待确认列表中的原值。
 export function newRequestId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   let timestamp = BigInt(Date.now())

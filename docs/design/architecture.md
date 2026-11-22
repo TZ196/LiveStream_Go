@@ -16,7 +16,7 @@ P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport �
 
 浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。最终事件流为：API 校验请求 → Kafka live.events → 两个独立消费者组。
 
-live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流。
+live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流，每组默认 4 个可配置成员，各自分担 16 个分区。实时成员共用同一个 API 内的连接管理器，每个活跃场次仅保留一个最高版本的待推送快照。API 每 200 毫秒广播有变化的场次。
 
 RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞从 P4 首次交付起以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，禁止 Producer 在发布前直接增加点赞数。发布前不读写 Redis 请求记录；事件时间由客户端 UUIDv7 request_id 确定。
 
@@ -86,7 +86,7 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 
 每连接一个业务读循环和一个业务写循环；所有 ACK、错误、广播进入写队列。队列满或写超时则关闭该慢连接，不阻塞整房间。不要将每条消息转换成无上限 goroutine。RoomHub 移除连接、房间关闭和进程退出共享幂等清理路径。Gorilla 对并发读写的限制见 [包文档](https://pkg.go.dev/github.com/gorilla/websocket#hdr-Concurrency)。
 
-RoomHub 广播采用短临界区复制连接引用，再在锁外尝试入队；快照不延长连接的业务有效期，发送与退出竞态通过退出状态及幂等清理处理。按分发顺序向同房间连接入队，不让共享 Worker 池并行打乱该房间相邻弹幕。该思路对应 [REF-03 与 ISSUE-07](../reviews/live-stream-danmaku-review.md)；对象池等分配优化待有测量依据再引入。
+点赞定时器在连接管理器锁内取走每场最新快照，向该场连接的有界队列非阻塞入队。每条连接的写循环完成网络发送。后续弹幕广播设计采用短临界区复制连接引用，再在锁外尝试入队；快照不延长连接的业务有效期，发送与退出竞态通过退出状态及幂等清理处理。按分发顺序向同房间连接入队，不让共享 Worker 池并行打乱该房间相邻弹幕。该思路对应 [REF-03 与 ISSUE-07](../reviews/live-stream-danmaku-review.md)；对象池等分配优化待有测量依据再引入。
 
 同一房间的弹幕顺序以其 Kafka 分区日志顺序为准，不能解释为浏览器墙钟时间的全序。点赞可跨分区处理，点赞之间以及点赞与弹幕之间没有全局顺序；点赞投影依赖幂等与原子累加。每分区串行处理批次，先实现正确的连续提交，再考虑并行优化。
 

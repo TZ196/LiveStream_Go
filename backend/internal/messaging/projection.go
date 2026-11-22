@@ -54,10 +54,13 @@ local oldOffset = redis.call('GET', KEYS[3])
 if oldOffset and not string.match(oldOffset, '^%d+$') then return redis.error_reply('INVALID_OFFSET') end
 if prior and prior ~= ARGV[2] then return redis.error_reply('EVENT_CONFLICT') end
 if not prior then
-  -- Redis 整数是有符号 64 位，提前检查避免部分写入。
-  if string.len(likes) > 18 or string.len(revision) > 18 then return redis.error_reply('COUNTER_LIMIT') end
-  redis.call('HINCRBY', KEYS[1], 'likes', 1)
-  redis.call('HINCRBY', KEYS[1], 'revision', 1)
+  -- 用 Redis 的整数运算保留 64 位精度；版本溢出时在同一脚本内还原计数。
+  redis.call('HINCRBY', KEYS[1], 'likes', ARGV[5])
+  local advanced = redis.pcall('HINCRBY', KEYS[1], 'revision', ARGV[5])
+  if type(advanced) == 'table' and advanced.err then
+    redis.call('HSET', KEYS[1], 'likes', likes)
+    return redis.error_reply(advanced.err)
+  end
   redis.call('SET', KEYS[2], ARGV[2], 'EX', ARGV[3])
 end
 local nextOffset = ARGV[4]
@@ -84,7 +87,7 @@ func (repository *ProjectionRepository) ApplyLike(ctx context.Context, record *k
 	prefix := "ls:v1:projection:" + repository.epoch + ":"
 	keys := []string{prefix + "session:" + event.SessionID, prefix + "processed:" + event.EventID, prefix + "partition:" + strconv.Itoa(int(record.Partition))}
 	fingerprint := event.UserID + ":" + event.RequestHash
-	result, err := projectLikeScript.Run(ctx, repository.client, keys, event.RoomID, fingerprint, 9*24*60*60, record.Offset+1).StringSlice()
+	result, err := projectLikeScript.Run(ctx, repository.client, keys, event.RoomID, fingerprint, 9*24*60*60, record.Offset+1, event.ClickCount()).StringSlice()
 	if err != nil {
 		return ProjectedLike{}, fmt.Errorf("更新实时点赞投影: %w", err)
 	}

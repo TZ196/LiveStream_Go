@@ -28,16 +28,15 @@ type Manager struct {
 	available  atomic.Bool
 	admission  sync.Mutex
 	mu         sync.Mutex
-	clients    map[*connection]struct{}
+	audiences  map[uint64]*audience
+	stopping   bool
 }
 
 type connection struct {
-	socket    *websocket.Conn
-	roomID    uint64
-	sessionID uint64
-	send      chan []byte
-	done      chan struct{}
-	once      sync.Once
+	socket *websocket.Conn
+	send   chan []byte
+	done   chan struct{}
+	once   sync.Once
 }
 
 type frame struct {
@@ -50,7 +49,7 @@ type frame struct {
 
 // NewManager 组装房间查询、一次性票据和 Kafka Producer。
 func NewManager(rooms *room.Service, producer *messaging.Producer, projection *messaging.ProjectionRepository, epoch string) *Manager {
-	return &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, epoch: epoch, clients: make(map[*connection]struct{})}
+	return &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, epoch: epoch, audiences: make(map[uint64]*audience)}
 }
 
 // close 关闭连接，允许多个路径同时调用。
@@ -91,7 +90,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if err != nil {
 		return
 	}
-	client := &connection{socket: socket, roomID: roomID, sessionID: session.ID, send: make(chan []byte, 128), done: make(chan struct{})}
+	client := &connection{socket: socket, send: make(chan []byte, 128), done: make(chan struct{})}
 	manager.admission.Lock()
 	active, checkErr := manager.rooms.ActiveSession(context.Background(), roomID)
 	if checkErr != nil || active.ID != session.ID {
@@ -100,10 +99,29 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	manager.mu.Lock()
-	manager.clients[client] = struct{}{}
+	if manager.stopping {
+		manager.mu.Unlock()
+		manager.admission.Unlock()
+		client.close()
+		return
+	}
+	view := manager.audiences[session.ID]
+	if view == nil {
+		view = &audience{roomID: roomID, clients: make(map[*connection]struct{})}
+		manager.audiences[session.ID] = view
+	}
+	view.clients[client] = struct{}{}
 	manager.mu.Unlock()
 	manager.admission.Unlock()
-	defer func() { manager.mu.Lock(); delete(manager.clients, client); manager.mu.Unlock(); client.close() }()
+	defer func() {
+		manager.mu.Lock()
+		delete(view.clients, client)
+		if len(view.clients) == 0 && manager.audiences[session.ID] == view {
+			delete(manager.audiences, session.ID)
+		}
+		manager.mu.Unlock()
+		client.close()
+	}()
 	go client.writeLoop(proof.identity.ExpiresAt)
 	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), time.Second)
 	snapshot, snapshotErr := manager.projection.ReadSession(snapshotCtx, roomText, strconv.FormatUint(session.ID, 10))
@@ -144,7 +162,11 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		var extra any
-		if decoder.Decode(&extra) != io.EOF || input.Version != 1 || input.Type != "LIKE" || input.SessionID != strconv.FormatUint(session.ID, 10) || string(input.Data) != "{}" {
+		if decoder.Decode(&extra) != io.EOF || input.Version != 1 || input.Type != "LIKE" || input.SessionID != strconv.FormatUint(session.ID, 10) {
+			return
+		}
+		count, err := readLikeCount(input.Data)
+		if err != nil {
 			return
 		}
 		manager.admission.Lock()
@@ -153,7 +175,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if err != nil || active.ID != session.ID {
 			return
 		}
-		event, err := messaging.NewLikeEvent(strconv.FormatUint(proof.identity.UserID, 10), roomText, input.SessionID, input.RequestID, time.Now())
+		event, err := messaging.NewLikeBatch(strconv.FormatUint(proof.identity.UserID, 10), roomText, input.SessionID, input.RequestID, count, time.Now())
 		if err != nil {
 			return
 		}
@@ -166,6 +188,18 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		ack, _ := json.Marshal(map[string]any{"version": 1, "type": "ACK", "request_id": event.RequestID, "event_id": event.EventID, "data": map[string]any{"status": "accepted", "accepted_via": "kafka", "accepted_at": nil}})
 		client.enqueue(ack)
 	}
+}
+
+// readLikeCount 兼容旧客户端的空对象；新请求只接收正的 int64 点击数。
+func readLikeCount(data json.RawMessage) (int64, error) {
+	var payload messaging.LikePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return 0, err
+	}
+	if payload.Count == 0 {
+		return 1, nil
+	}
+	return payload.Count, nil
 }
 
 // writeLoop 独占连接写入，周期性 ping 并在身份到期时关闭。
@@ -195,49 +229,44 @@ func (client *connection) writeLoop(expires time.Time) {
 	}
 }
 
-// BroadcastLike 仅向同一场次的在线连接广播实时消费者计算出的投影。
-func (manager *Manager) BroadcastLike(event messaging.LikeEvent, projection messaging.ProjectedLike, epoch string) {
-	if projection.Duplicate {
-		return
-	}
-	payload, err := json.Marshal(map[string]any{"version": 1, "type": "LIKE_UPDATE", "event_id": event.EventID, "request_id": event.RequestID, "data": map[string]any{"room_id": event.RoomID, "session_id": event.SessionID, "like_count": projection.Count, "likes_revision": projection.Revision, "projection_epoch": epoch}})
-	if err != nil {
-		return
-	}
-	roomID, err := strconv.ParseUint(event.RoomID, 10, 64)
-	if err != nil {
-		return
-	}
-	sessionID, err := strconv.ParseUint(event.SessionID, 10, 64)
-	if err != nil {
-		return
-	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	for client := range manager.clients {
-		if client.roomID == roomID && client.sessionID == sessionID {
-			client.enqueue(payload)
-		}
-	}
-}
-
-// CloseRoom 断开已经结束直播的房间连接，避免旧场次混入新场次。
+// CloseRoom 关闭已结束房间的连接，一并移除尚待广播的旧场快照。
 func (manager *Manager) CloseRoom(roomID uint64) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	for client := range manager.clients {
-		if client.roomID == roomID {
-			client.close()
+	for id, view := range manager.audiences {
+		if view.roomID == roomID {
+			for client := range view.clients {
+				client.close()
+			}
+			delete(manager.audiences, id)
 		}
 	}
 }
 
-// Close 关闭当前进程的所有 WebSocket 连接。
+// Close 关闭当前进程的房间连接。
 func (manager *Manager) Close() {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	for client := range manager.clients {
-		client.close()
+	manager.stopping = true
+	manager.disconnectAllLocked()
+}
+
+// Resume 让现有页面重新握手，读回暂停期间可能尚未推送的权威快照。
+func (manager *Manager) Resume() {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if !manager.stopping {
+		manager.available.Store(true)
+		manager.disconnectAllLocked()
+	}
+}
+
+func (manager *Manager) disconnectAllLocked() {
+	for id, view := range manager.audiences {
+		for client := range view.clients {
+			client.close()
+		}
+		delete(manager.audiences, id)
 	}
 }
 
@@ -252,8 +281,11 @@ func (manager *Manager) BroadcastUnavailable() {
 	payload, _ := json.Marshal(map[string]any{"version": 1, "type": "LIKES_UNAVAILABLE", "data": map[string]any{}})
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	for client := range manager.clients {
-		client.enqueue(payload)
+	for _, view := range manager.audiences {
+		view.pending = nil
+		for client := range view.clients {
+			client.enqueue(payload)
+		}
 	}
 }
 

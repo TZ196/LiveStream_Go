@@ -18,7 +18,7 @@ MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository
 | live_rooms | id；owner_id 外键 users；title VARCHAR(80)；status VARCHAR(16)，仅 OPEN/CLOSED；created_at；closed_at 可空 | PRIMARY(id)，(status,id)，(owner_id,id) | P2 |
 | live_sessions | id；room_id 外键 live_rooms；started_at、ended_at；当前活动状态 | PRIMARY(id)，(room_id,id)；每房间最多一个活动场次，需数据库约束与事务共同保证 | P3 |
 | danmaku_messages | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；username VARCHAR(32) 快照；content VARCHAR(200)；created_at 事件时间；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(room_id,id) | P6 |
-| interaction_events | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；event_type，仅 LIKE_CLICKED；created_at；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(session_id,id) | P4 |
+| interaction_events | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；event_type，仅 LIKE_CLICKED；click_count BIGINT NOT NULL DEFAULT 1，CHECK 大于 0；created_at；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(session_id,id) | P4 |
 
 表内业务字段除明确可空项外均为 NOT NULL。CHECK 约束确保 OPEN 的 closed_at 为空、CLOSED 的 closed_at 非空。接口校验不代替唯一约束和数据库事务。
 
@@ -26,7 +26,7 @@ live_rooms 是长期房间，live_sessions 记录每次独立开播。版本 4 �
 
 当前 users 的 username 使用 ASCII 字符集、ascii_bin 排序和唯一索引；CHECK 限定 3–32 位小写 ASCII 字母、数字、下划线且首位为字母。User Service 按领域模型规范化输入，Repository 通过 GORM 写入，数据库唯一约束裁决并发同名注册。password_hash 保存包含参数、随机盐和输出的 Argon2id 编码；不保存明文密码。账号认证复用现有四列，未新增迁移或修改结构版本。
 
-V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理；点赞汇总从 Redis 读取，恢复时从 interaction_events 唯一事件汇总。避免建立没有业务生命周期定义的成员或统计副本。
+V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理；点赞汇总从 Redis 读取，核对与恢复时对 interaction_events 按 session_id 汇总 SUM(click_count)。一行代表一个已去重的批次。避免建立没有业务生命周期定义的成员或统计副本。
 
 
 ### 房间与开播场次
@@ -70,7 +70,7 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 | ratelimit:danmaku:{user_id}:{window} | String，固定窗口计数 | 10 秒窗口结束后再保留 10 秒 |
 | ratelimit:auth:{ip_hash}:{window} | String，登录注册计数 | 60 秒窗口结束后再保留 60 秒；P4 可接入 |
 
-业务固定窗口按服务端 UTC 时间计算。新弹幕每用户每 10 秒最多 10 次，点赞最多 20 次；点赞入口不得依赖 Redis 请求登记或 Redis 限流；无状态去重时重复请求也可能消耗限流额度，具体限制须在接入前验证。恶意重复帧仍受连接容量及消息大小约束。
+弹幕规划为按服务端 UTC 固定窗口限流，每用户每 10 秒最多 10 次。点赞入口校验正整数 count，不按点击数限流，也不配置单批点击数上限。WebSocket 帧仍适用 8 KiB 的协议大小约束。
 
 消费端以原子脚本比较事件指纹，并更新事件标记、计数、revision 和分区进度。脚本只处理当前请求或事件，不在脚本中遍历全库。使用 Redis 7 standalone，设置 noeviction，启用 AOF everysec 和持久卷，但不将 AOF 等同于零丢失保证。
 
@@ -97,18 +97,18 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 | 1 | [000001_create_users.go](../../backend/migrations/000001_create_users.go) 使用固定 userV1 模型与 Migrator.CreateTable 建立 users | 无成功版本且不存在 users；完成后登记 1，不复用未来会变化的业务模型 |
 | 2 | [000002_tighten_username_check.go](../../backend/migrations/000002_tighten_username_check.go) 通过 GORM.Exec 原子替换用户名 CHECK | 已成功执行 1；校验长度、字母开头及非法字符，完成后登记 2 |
 | 3 | [000003_create_live_rooms.go](../../backend/migrations/000003_create_live_rooms.go) 使用固定 roomV3 建立 live_rooms、两项组合索引、房主外键和状态 CHECK | 已成功执行 2；只新增房间表，保留用户与旧成功记录，完成后登记 3 |
-
 | 4 | [000004_create_sessions_likes.go](../../backend/migrations/000004_create_sessions_likes.go) | 新增场次、点赞事件、消费检查点和投影初始化表；旧 OPEN 房间的开始时间保留为未知 |
+| 5 | [000005_like_batch_count.go](../../backend/migrations/000005_like_batch_count.go) | 为 interaction_events 增加 click_count 及正数约束，旧记录各为 1，新记录保存该批点击数 |
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
-独立迁移命令依次补齐版本 1–4，已成功版本不会重新执行。版本 4 的 MySQL DDL 隐式提交，若中途失败须核对实际表结构并前向修复，不能假称自动回滚；执行前应备份。旧 API 与版本 4 新 API 要求不同，升级数据库后应同时更新 API。
+独立迁移命令依次补齐版本 1–5。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5 迁移，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
 
 命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
 
 MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体回滚的事务。失败或中断后先检查实际表、约束与成功记录：若某步未生效，修复原因后重试；若 DDL 已生效而记录未写入，须依据该版本逐项核对并完成受控修复后再恢复迁移。命令不会自动接管无版本的已有表、补写版本或回滚删表。不能通过强写版本号、重复整份旧 SQL 或删库重建掩盖失败。[MySQL 隐式提交说明](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)
 
-当前 API 要求成功记录连续且最新版本恰好为 4，并检查用户、房间、场次和点赞相关表；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
+当前 API 和 Worker 要求成功记录连续且最新版本恰好为 5，并检查用户、房间、场次和点赞相关表及 click_count 列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
 
 按 P1b 用户、P2 房间、P3 场次、P4 点赞事件、P6 恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/schema.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
 

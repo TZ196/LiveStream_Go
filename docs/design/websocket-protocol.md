@@ -18,7 +18,7 @@ P3 场次模型启用后，票据和已连接状态绑定 user_id、room_id、se
 
 使用 UTF-8 文本 JSON 帧，拒绝非法 UTF-8，不接收二进制业务帧。version 必须为 1；客户端消息只接受定义的字段。单消息最多 8 KiB，超出使用关闭码 1009。弹幕不接受 NUL 和除制表符、换行外的控制字符；文本只作为文本渲染。
 
-业务 request_id 为规范小写 UUIDv7，由客户端在消息产生时生成并保留；事件时间从该 ID 提取，客户端时钟需满足校验窗口。同一次动作重试必须保留 request_id、session_id、消息类型和 data，不合并后续点击。DANMAKU.data 只有 content；LIKE.data 为 {}，固定 +1，不接收 count。room_id 来自连接；客户端传入原始 session_id 以保证重试不意外改绑，服务端验证其来源与授权，不能仅因客户端提供就信任。场次结束后的旧请求不能改绑新场；没有请求登记时无法判断旧请求是否曾准入，安全处理仍待设计。
+业务 request_id 为规范小写 UUIDv7，由客户端在消息产生时生成并保留；事件时间从该 ID 提取，客户端时钟需满足校验窗口。每条弹幕和每个点赞批次各有一个 request_id。重试沿用原 request_id、session_id、消息类型与 data。DANMAKU.data 只有 content。LIKE.data 只有 count，取值为正的 JSON 整数，须可表示为有符号 64 位整数。兼容旧客户端的空对象 `{}`，按 1 次点击处理。服务端接收完整批次，未设置点击频率或单批点击数的业务上限。room_id 来自连接；客户端传入原始 session_id 以保证重试不意外改绑，服务端验证其来源与授权，不能仅因客户端提供就信任。场次结束后的旧请求不能改绑新场；没有请求登记时无法判断旧请求是否曾准入，安全处理仍待设计。
 
 ```json
 {
@@ -36,7 +36,7 @@ P3 场次模型启用后，票据和已连接状态绑定 user_id、room_id、se
   "type": "LIKE",
   "session_id": "3001",
   "request_id": "01a1edab-7801-7abc-8000-123456789abc",
-  "data": {}
+  "data": {"count": 5}
 }
 ```
 
@@ -84,7 +84,7 @@ outcome 描述当前业务动作的已知结果，不只描述本次网络尝试
 | --- | --- | --- |
 | ROOM_STATE | 无 | room_id、session_id、status、connection_id、auth_expires_at、online_count、server_instance_id、presence_revision、like_count、likes_available、projection_epoch、likes_revision、delivery_modes、history_available |
 | DANMAKU_BROADCAST | event_id、request_id | room_id、session_id、user_id、username、content、created_at |
-| LIKE_UPDATE | event_id、request_id | room_id、session_id、like_count、projection_epoch、likes_revision |
+| LIKE_UPDATE | 无 | room_id、session_id、like_count、projection_epoch、likes_revision |
 | ROOM_ONLINE_UPDATE | 无 | room_id、online_count、server_instance_id、presence_revision |
 | ROOM_CLOSED | 无 | room_id、closed_at、reason=owner_closed |
 | PONG | 无 | nonce、server_time |
@@ -92,9 +92,9 @@ outcome 描述当前业务动作的已知结果，不只描述本次网络尝试
 
 ROOM_STATE 的统计字段与 HTTP RoomStats 一致；delivery_modes 为按消息类型区分的对象，例如 P3 `{"DANMAKU":"memory","LIKE":null}`，P4 `{"DANMAKU":"memory","LIKE":"kafka"}`，P5 起 `{"DANMAKU":"kafka","LIKE":"kafka"}`。单一 delivery_mode 无法表达 P4 两条不同链路，协议未实现，交付前须同步前端和验收。history_available 指弹幕历史，在 P6 完成后为 true；P4 点赞写库不意味着弹幕历史已交付。连接和进程标识为 UUID 字符串，status 使用 OPEN/CLOSED。
 
-业务事件通过 event_id 去重；request_id 只与当前用户自己的待确认操作关联，不能单凭其他用户的 request_id 合并。广播可能先于 ACK，收到广播后展示消息，后到 ACK 只更新发送状态。
+弹幕广播按 event_id 去重。点赞 ACK 只确认发送者对应的批次。LIKE_UPDATE 是全场绝对总数的快照，可以覆盖多个用户的多个批次。快照和 ACK 可以先后独立到达，只有 ACK 能移除待确认批次。
 
-likes_revision 为同一 projection_epoch 及 session_id 内的单调递增字符串整数，每个首次有效点赞加一；重复事件不增加。presence_revision 从进程级递增序列分配，每个房间保留最近值，回收空房间再建立时也不回退；server_instance_id 在进程启动时重新生成。旧版本状态不得覆盖新版本。发现投影 epoch 改变时重新取快照；恢复流程会关闭旧连接以隔离旧状态。
+likes_revision 为同一 projection_epoch 及 session_id 内的单调递增字符串整数，每个首次处理的批次按 count 增加，重复事件保持原值。API 每 200 毫秒向有观众且有变化的场次推送一次最新快照，空闲周期没有消息。客户端在同一场次、同一投影代次只采用较新或相同的版本。presence_revision 从进程级递增序列分配，每个房间保留最近值，回收空房间再建立时也不回退；server_instance_id 在进程启动时重新生成。旧版本状态不得覆盖新版本。发现投影 epoch 改变时重新取快照；恢复流程会关闭旧连接以隔离旧状态。
 
 ## 心跳及退出
 
@@ -116,6 +116,8 @@ likes_revision 为同一 projection_epoch 及 session_id 内的单调递增字�
 
 HTTP 与 WebSocket 分别集中封装，页面只使用明确的业务状态。断线重连使用 1、2、4、8、16、30 秒上限的指数退避并加抖动；每轮最多 10 次，之后提供手动重连。主动离开或组件卸载取消定时器、关闭连接、清空监听器。
 
-待确认业务请求每轮最多自动重试 5 次；不向用户展示 Kafka 内部确认丢失信息，仍未确认时停止自动重发并保留原请求；安全的后续查询能力待设计；在 24 小时窗口内保留原标识，不创建替代操作。每个标签页最多保存 100 条待确认请求到 sessionStorage，绑定 user_id，清除后不自动恢复发送；访问令牌不写入该存储。当前每次请求最多自动发送 5 次，超过后保留待确认状态。
+同一标签页内按用户、房间和场次聚合点赞。第一下点击开启固定 500 毫秒窗口，每下立即显示 +1 动画。到时发送一个带本窗口总数的 LIKE。窗口截止后的点击另开一批，前一批等待 ACK 时仍可点击。
+
+每个批次首发后冻结 ID 和数量。自上次发送经过 3 秒仍无 ACK，或重新连上同一场次时，才会重试该批。每批含首次在内最多发送 5 次，耗尽后保留未确认状态。当前场次最多保存 100 个待确认批次，正在聚合的批次可继续计数。sessionStorage 保存未首发的点击和已发的批次，同标签页刷新可恢复。清除标签页存储会失去这些本地记录。旧版待确认记录按原 ID 和数量 1 恢复，旧场批次保留在旧场。
 
 前端维护有界事件去重缓存，最多 5000 个 event_id，消息列表默认最多 1000 条。浏览器重连后获取 ROOM_STATE，再加载可用历史，并与实时事件合并；不承诺恢复离线期间所有即时推送。

@@ -33,6 +33,7 @@
 - [P1a：工程骨架](verification/reports/p1a.md)
 - [P1b：数据库与用户认证](verification/reports/p1b.md)
 - [P2：房间管理及主干合并复查](verification/reports/p2.md)
+- [初版点赞链路](verification/reports/likes-chain.md)和[批量点赞、快照与消费组验收](verification/reports/batched-likes.md)
 
 ## 维护约定
 

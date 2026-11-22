@@ -52,21 +52,11 @@ func run() error {
 	repository := messaging.NewPersistenceRepository(db)
 	for ctx.Err() == nil {
 		check, checkCancel := context.WithTimeout(ctx, 10*time.Second)
-		consumer, consumerErr := messaging.NewConsumer(check, likes.Brokers, "live-persistence")
+		consumer, consumerErr := messaging.OpenConsumerGroup(check, likes.Brokers, "live-persistence", likes.PersistenceConsumers, repository.ValidatePersistenceStartup)
+		checkCancel()
 		if consumerErr == nil {
-			offsets, offsetErr := consumer.CommittedOffsets(check)
-			if offsetErr == nil {
-				offsetErr = repository.ValidatePersistenceStartup(check, consumer.TopicID(), offsets)
-			}
-			checkCancel()
-			if offsetErr == nil {
-				consumerErr = consumer.Run(ctx, repository.PersistLike)
-			} else {
-				consumerErr = offsetErr
-			}
+			consumerErr = consumer.Run(ctx, repository.PersistLike)
 			consumer.Close()
-		} else {
-			checkCancel()
 		}
 		if ctx.Err() != nil {
 			return nil

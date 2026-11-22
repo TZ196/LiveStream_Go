@@ -2,8 +2,10 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -11,11 +13,13 @@ import (
 
 // Likes 保存点赞链路的连接设置。
 type Likes struct {
-	Enabled         bool
-	RedisAddr       string
-	Brokers         []string
-	ProjectionEpoch string
-	WSOrigin        string
+	Enabled              bool
+	RedisAddr            string
+	Brokers              []string
+	ProjectionEpoch      string
+	WSOrigin             string
+	RealtimeConsumers    int
+	PersistenceConsumers int
 }
 
 // LoadLikes 从环境变量加载点赞链路配置；未启用时不连接中间件。
@@ -41,5 +45,25 @@ func LoadLikes() (Likes, error) {
 	if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.User != nil {
 		return Likes{}, errors.New("WebSocket 来源必须是完整的 HTTP 或 HTTPS Origin")
 	}
+	cfg.RealtimeConsumers, err = consumerCount("LIVESTREAM_REALTIME_CONSUMERS")
+	if err != nil {
+		return Likes{}, err
+	}
+	cfg.PersistenceConsumers, err = consumerCount("LIVESTREAM_PERSISTENCE_CONSUMERS")
+	if err != nil {
+		return Likes{}, err
+	}
 	return cfg, nil
+}
+
+func consumerCount(key string) (int, error) {
+	value, configured := os.LookupEnv(key)
+	if !configured {
+		return 4, nil
+	}
+	count, err := strconv.Atoi(value)
+	if err != nil || count < 1 || count > 16 {
+		return 0, fmt.Errorf("%s 须为 1 到 16 之间的整数", key)
+	}
+	return count, nil
 }
