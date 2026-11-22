@@ -64,7 +64,9 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 | --- | --- | --- |
 | projection:active | String，当前 epoch | 不过期，恢复完成后切换 |
 | projection:{epoch}:meta | Hash，READY 状态、topic 身份 | 不过期；恢复期间新代不对外启用 |
-| projection:{epoch}:session:{session_id} | Hash，room_id、likes、revision、initialized | 不过期；已结束场次也保留；场次身份需从权威数据校验 |
+| projection:{epoch}:session:{session_id} | Hash，room_id、likes、revision、initialized 及榜单校验字段 board_users、board_revision、board_through | 不过期；已结束场次也保留；场次身份需从权威数据校验 |
+| projection:{epoch}:session:{session_id}:users | Hash，user_id 映射到本场个人累计点击数，含全部点赞者 | 不过期，空榜不占键 |
+| projection:{epoch}:session:{session_id}:top | ZSET，保存排在最前的至多 100 人 | 不过期，空榜不占键 |
 | projection:{epoch}:processed:{event_id} | String，已处理标记及指纹 | 首次处理起 9 天，重复不延长 |
 | projection:{epoch}:partition:{partition_id} | String，next_offset | 不过期；随投影原子更新 |
 | ratelimit:danmaku:{user_id}:{window} | String，固定窗口计数 | 10 秒窗口结束后再保留 10 秒 |
@@ -73,6 +75,10 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 弹幕规划为按服务端 UTC 固定窗口限流，每用户每 10 秒最多 10 次。点赞入口校验正整数 count，不按点击数限流，也不配置单批点击数上限。WebSocket 帧仍适用 8 KiB 的协议大小约束。
 
 消费端以原子脚本比较事件指纹，并更新事件标记、计数、revision 和分区进度。脚本只处理当前请求或事件，不在脚本中遍历全库。使用 Redis 7 standalone，设置 noeviction，启用 AOF everysec 和持久卷，但不将 AOF 等同于零丢失保证。
+
+个人累计数保留有符号 64 位正整数精度。Redis ZSET 的浮点分值无法区分所有相邻的大整数，因此每个成员的 score 固定为 0。成员由 19 位左补零的点击数逐位取 9 的补数，再拼接 20 位左补零的数值用户 ID。ZRANGE 从小到大读取即为业务顺序。每次点击数增加时只需比较第 100 名、更新该用户并裁剪末位。Hash 内榜外人员的数据仍可直接读取。
+
+board_users 记录参与人数，board_through 记录已处理至哪个场次版本，board_revision 只在前 100 名的内容变化时推进。读取和写入检查 Hash 与 ZSET 的条数、场次版本。正常运行只按变更更新，Redis 内存随各场次参与人数和事件去重标记增长。
 
 握手票据、连接数和 RoomHub 不写入 Redis。密码、JWT 密钥不写入 Redis。
 
@@ -102,7 +108,7 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
-独立迁移命令依次补齐版本 1–5。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5 迁移，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
+独立迁移命令依次补齐版本 1–5。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5 迁移，已有点赞投影时先完成[本场榜单补建](../deployment.md#已有点赞数据升级到本场榜单)，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
 
 命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
 

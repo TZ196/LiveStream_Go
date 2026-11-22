@@ -88,7 +88,7 @@ func TestProjectionIntegration(t *testing.T) {
 
 	// revision 先到达整数上界时，likes、去重标记和分区位移都应保持原值。
 	sessionKey := "ls:v1:projection:" + epoch + ":session:3"
-	if err := client.HSet(ctx, sessionKey, "revision", "9223372036854775806").Err(); err != nil {
+	if err := client.HSet(ctx, sessionKey, "revision", "9223372036854775806", "board_through", "9223372036854775806").Err(); err != nil {
 		t.Fatal(err)
 	}
 	newID, err := uuid.NewV7()

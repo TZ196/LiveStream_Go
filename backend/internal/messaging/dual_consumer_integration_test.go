@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,12 +59,14 @@ func TestDualConsumerIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer realtime.Close()
+	closeRealtime := sync.OnceFunc(realtime.Close)
+	defer closeRealtime()
 	worker, err := OpenConsumerGroup(ctx, []string{broker}, "live-persistence", 4, persistence.ValidatePersistenceStartup)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer worker.Close()
+	closeWorker := sync.OnceFunc(worker.Close)
+	defer closeWorker()
 	defer cancel() // 发生断言失败时也先停止拉取，再释放两个组。
 	results := make(chan error, 2)
 	var realtimeDone, persistenceDone atomic.Int32
@@ -136,12 +140,20 @@ func TestDualConsumerIntegration(t *testing.T) {
 			dbErr := db.Table("interaction_events").Where("session_id = ?", n).
 				Select("COUNT(*) AS batches, COALESCE(SUM(click_count), 0) AS clicks").Scan(&totals).Error
 			if redisErr == nil && dbErr == nil && likes == "38" && totals.Batches == 2 && totals.Clicks == 38 && realtimeDone.Load() == 4 && persistenceDone.Load() == 4 {
+				if err := initializer.BackfillLeaderboards(ctx, []string{broker}); err == nil || !strings.Contains(err.Error(), "请先停止 live-realtime") {
+					t.Fatalf("活跃消费组未触发维护保护: %v", err)
+				}
 				cancel()
 				for i := 0; i < 2; i++ {
 					if err := <-results; err != nil {
 						t.Fatal(err)
 					}
 				}
+				closeRealtime()
+				closeWorker()
+				t.Run("旧场次点赞补建", func(t *testing.T) {
+					verifyLeaderboardUpgrade(t, initializer, broker, id)
+				})
 				return
 			}
 		}

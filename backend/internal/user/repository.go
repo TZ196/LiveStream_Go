@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -59,4 +60,23 @@ func (r *Repository) FindByID(ctx context.Context, id uint64) (User, error) {
 		return User{}, ErrNotFound
 	}
 	return account, err
+}
+
+// Names 批量读取排行榜显示所需的公开用户名。
+func (r *Repository) Names(ctx context.Context, ids []uint64) (map[string]string, error) {
+	names := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return names, nil
+	}
+	var users []User
+	if err := r.db.WithContext(ctx).Select("id", "username").Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		names[strconv.FormatUint(u.ID, 10)] = u.Username
+	}
+	if len(names) != len(ids) {
+		return nil, errors.New("榜单用户信息不完整")
+	}
+	return names, nil
 }

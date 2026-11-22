@@ -24,7 +24,7 @@ func TestReadLikeCount(t *testing.T) {
 
 // 不同分区可以乱序完成，打开过的推送窗口也不能使 revision 回退。
 func TestCoalescedLikeUpdates(t *testing.T) {
-	manager := NewManager(nil, nil, nil, "epoch")
+	manager := NewManager(nil, nil, nil, nil, nil, "epoch")
 	manager.SetAvailable(true)
 	viewer := &connection{send: make(chan []byte, 8)}
 	other := &connection{send: make(chan []byte, 8)}

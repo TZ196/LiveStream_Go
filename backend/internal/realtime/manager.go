@@ -15,21 +15,24 @@ import (
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
+	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/gorilla/websocket"
 )
 
 // Manager 管理当前进程的房间连接，点赞只通过 Kafka 发布。
 type Manager struct {
-	Tickets    *Tickets
-	rooms      *room.Service
-	producer   *messaging.Producer
-	projection *messaging.ProjectionRepository
-	epoch      string
-	available  atomic.Bool
-	admission  sync.Mutex
-	mu         sync.Mutex
-	audiences  map[uint64]*audience
-	stopping   bool
+	Tickets     *Tickets
+	rooms       *room.Service
+	producer    *messaging.Producer
+	projection  *messaging.ProjectionRepository
+	initializer *messaging.ProjectionInitializer
+	users       *user.Repository
+	epoch       string
+	available   atomic.Bool
+	admission   sync.Mutex
+	mu          sync.Mutex
+	audiences   map[uint64]*audience
+	stopping    bool
 }
 
 type connection struct {
@@ -48,8 +51,8 @@ type frame struct {
 }
 
 // NewManager 组装房间查询、一次性票据和 Kafka Producer。
-func NewManager(rooms *room.Service, producer *messaging.Producer, projection *messaging.ProjectionRepository, epoch string) *Manager {
-	return &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, epoch: epoch, audiences: make(map[uint64]*audience)}
+func NewManager(rooms *room.Service, producer *messaging.Producer, projection *messaging.ProjectionRepository, initializer *messaging.ProjectionInitializer, users *user.Repository, epoch string) *Manager {
+	return &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, initializer: initializer, users: users, epoch: epoch, audiences: make(map[uint64]*audience)}
 }
 
 // close 关闭连接，允许多个路径同时调用。
@@ -107,15 +110,32 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	view := manager.audiences[session.ID]
 	if view == nil {
-		view = &audience{roomID: roomID, clients: make(map[*connection]struct{})}
+		view = &audience{
+			roomID:      roomID,
+			clients:     make(map[*connection]struct{}),
+			people:      make(map[string]*personalUpdate),
+			dirtyPeople: make(map[string]*personalUpdate),
+		}
 		manager.audiences[session.ID] = view
 	}
 	view.clients[client] = struct{}{}
+	userID := strconv.FormatUint(proof.identity.UserID, 10)
+	person := view.people[userID]
+	if person == nil {
+		person = &personalUpdate{clients: make(map[*connection]struct{})}
+		view.people[userID] = person
+	}
+	person.clients[client] = struct{}{}
 	manager.mu.Unlock()
 	manager.admission.Unlock()
 	defer func() {
 		manager.mu.Lock()
 		delete(view.clients, client)
+		delete(person.clients, client)
+		if len(person.clients) == 0 {
+			delete(view.people, userID)
+			delete(view.dirtyPeople, userID)
+		}
 		if len(view.clients) == 0 && manager.audiences[session.ID] == view {
 			delete(manager.audiences, session.ID)
 		}
@@ -124,7 +144,11 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}()
 	go client.writeLoop(proof.identity.ExpiresAt)
 	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), time.Second)
-	snapshot, snapshotErr := manager.projection.ReadSession(snapshotCtx, roomText, strconv.FormatUint(session.ID, 10))
+	var snapshot messaging.ProjectedLike
+	snapshotErr := manager.initializer.EnsureSession(snapshotCtx, roomID, session.ID)
+	if snapshotErr == nil {
+		snapshot, snapshotErr = manager.projection.ReadSession(snapshotCtx, roomText, strconv.FormatUint(session.ID, 10))
+	}
 	snapshotCancel()
 	if !manager.available.Load() {
 		snapshotErr = errors.New("实时消费者未就绪")

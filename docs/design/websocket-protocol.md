@@ -85,6 +85,9 @@ outcome 描述当前业务动作的已知结果，不只描述本次网络尝试
 | ROOM_STATE | 无 | room_id、session_id、status、connection_id、auth_expires_at、online_count、server_instance_id、presence_revision、like_count、likes_available、projection_epoch、likes_revision、delivery_modes、history_available |
 | DANMAKU_BROADCAST | event_id、request_id | room_id、session_id、user_id、username、content、created_at |
 | LIKE_UPDATE | 无 | room_id、session_id、like_count、projection_epoch、likes_revision |
+| LIKE_BOARD_DELTA | 无 | room_id、session_id、projection_epoch、base_revision、revision、size、changes |
+| LIKE_BOARD_REFRESH | 无 | room_id、session_id、projection_epoch、revision |
+| MY_LIKES_UPDATE | 无 | session_id、projection_epoch、likes_revision、count，只送本人在本场的连接 |
 | ROOM_ONLINE_UPDATE | 无 | room_id、online_count、server_instance_id、presence_revision |
 | ROOM_CLOSED | 无 | room_id、closed_at、reason=owner_closed |
 | PONG | 无 | nonce、server_time |
@@ -95,6 +98,10 @@ ROOM_STATE 的统计字段与 HTTP RoomStats 一致；delivery_modes 为按消�
 弹幕广播按 event_id 去重。点赞 ACK 只确认发送者对应的批次。LIKE_UPDATE 是全场绝对总数的快照，可以覆盖多个用户的多个批次。快照和 ACK 可以先后独立到达，只有 ACK 能移除待确认批次。
 
 likes_revision 为同一 projection_epoch 及 session_id 内的单调递增字符串整数，每个首次处理的批次按 count 增加，重复事件保持原值。API 每 200 毫秒向有观众且有变化的场次推送一次最新快照，空闲周期没有消息。客户端在同一场次、同一投影代次只采用较新或相同的版本。presence_revision 从进程级递增序列分配，每个房间保留最近值，回收空房间再建立时也不回退；server_instance_id 在进程启动时重新生成。旧版本状态不得覆盖新版本。发现投影 epoch 改变时重新取快照；恢复流程会关闭旧连接以隔离旧状态。
+
+每次加入或重连，前端收到带场次和投影代次的 ROOM_STATE 后，从 HTTP 获取本场榜单和本人累计数。API 每秒合并一次公共榜单变化。LIKE_BOARD_DELTA 中的 changes 为发生变化的完整名次行，字段与 HTTP top 一致。客户端从 base_revision 对应的榜单替换这些名次，将长度设为 size，再采用 revision。基准版本缺失、补丁无效或收到 LIKE_BOARD_REFRESH 时，重新获取一次 HTTP 快照。差量帧编码后超过 8192 字节时服务端只发刷新通知。
+
+MY_LIKES_UPDATE 带最终累计数，包括榜外用户的点击。一个用户打开多个标签页时，这些连接同时收到本人更新，其他用户只接收公开榜单和房间总数。个人数按 likes_revision 比较，公共榜单按 revision 比较。两者独立过滤迟到数据，换场或换代后重新取得快照。
 
 ## 心跳及退出
 

@@ -11,10 +11,16 @@ import (
 
 // 每个有观众的场次只保存一份待推送快照。所有成员共享 manager.mu。
 type audience struct {
-	roomID   uint64
-	clients  map[*connection]struct{}
-	revision int64
-	pending  *likeUpdate
+	roomID      uint64
+	clients     map[*connection]struct{}
+	revision    int64
+	pending     *likeUpdate
+	people      map[string]*personalUpdate
+	dirtyPeople map[string]*personalUpdate
+	board       publicBoard
+	wantedBoard int64
+	sentBoard   int64
+	lastTop     []BoardRow
 }
 
 type likeUpdate struct {
@@ -41,7 +47,18 @@ func (manager *Manager) QueueLikeUpdate(event messaging.LikeEvent, projection me
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	view := manager.audiences[sessionID]
-	if view == nil || !manager.available.Load() || revision <= view.revision {
+	if view == nil || !manager.available.Load() {
+		return
+	}
+	// 不同分区的返回可乱序。个人更新按照该用户自己的版本独立比较。
+	if person := view.people[event.UserID]; person != nil && revision > person.revision {
+		person.revision, person.count = revision, projection.Personal
+		view.dirtyPeople[event.UserID] = person
+	}
+	if projection.BoardRevision == projection.Revision && revision > view.wantedBoard {
+		view.wantedBoard = revision
+	}
+	if revision <= view.revision {
 		return
 	}
 	view.revision = revision

@@ -12,6 +12,7 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
 	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
+	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"gorm.io/gorm"
@@ -51,12 +52,13 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 		_ = redisClient.Close()
 		return nil, fmt.Errorf("实时投影检查: %w", err)
 	}
-	manager := realtime.NewManager(rooms, producer, projection, cfg.ProjectionEpoch)
+	manager := realtime.NewManager(rooms, producer, projection, initializer, user.NewRepository(db), cfg.ProjectionEpoch)
 	api.EnableRealtime(manager, cfg.WSOrigin)
 	manager.SetAvailable(true)
 	ctx, stop := context.WithCancel(parent)
 	var wait sync.WaitGroup
-	wait.Add(2)
+	wait.Add(3)
+	go func() { defer wait.Done(); manager.RunLeaderboard(ctx) }()
 	go func() {
 		defer wait.Done()
 		manager.RunLikeUpdates(ctx)
