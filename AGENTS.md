@@ -16,12 +16,12 @@
 - 实时连接使用 **Gorilla WebSocket + Hertz HTTP Adaptor**，通过 `github.com/cloudwego/hertz/pkg/common/adaptor` 接入；连接读写和 RoomHub 统一封装。
 - 前端统一使用 **Vue 3 + TypeScript + Vite**，采用 Composition API，代码位于 `frontend/`。
 - 数据与消息组件为 **MySQL 8.4、Redis 7、Apache Kafka**；在依赖或部署文件中锁定实际使用的具体版本。
-- MySQL 访问统一使用 **GORM + GORM MySQL 适配器**，由 GORM 创建底层连接池，再通过 DB() 设置容量和关闭资源；具体版本锁定在 backend/go.mod。业务查询与事务放在 Repository，Service 和业务 Handler 不直接操作 GORM。结构由 `backend/cmd/migrate` 独立 GORM 命令按版本执行、成功记录、失败停止；API/Worker 启动不调用 AutoMigrate。当前迁移文件为 Go，已成功版本不可改写，已有成功记录继续兼容；选型与边界见 [GORM 决策](docs/decisions/0004-gorm-database-access.md)。
+- MySQL 访问统一使用 **GORM + GORM MySQL 适配器**，由 GORM 创建底层连接池，再通过 DB() 设置容量和关闭资源；具体版本锁定在 backend/go.mod。业务查询与事务放在 Repository，Service 和业务 Handler 不直接操作 GORM。结构由 `backend/cmd/migrate` 独立 GORM 命令按版本执行、成功记录、失败停止；API/Worker 启动不调用 AutoMigrate。当前迁移文件为 Go，已成功版本不可改写，已有成功记录继续兼容；边界见 [数据设计](docs/design/database.md#迁移与版本)。
 - 后端模块文件位于 `backend/go.mod`，初始化后维护 `backend/go.sum`；启动入口为 `backend/cmd/api/main.go` 和 `backend/cmd/worker/main.go`。业务代码位于 `backend/internal/`，数据库迁移位于 `backend/migrations/`。
 - 应用配置样例位于 `backend/configs/`，后端镜像构建文件位于 `backend/Dockerfile`，Compose 配置位于 `deployments/docker/compose.yaml`；前端依赖与脚本由 `frontend/package.json` 管理。
 - 以上为目标工程结构，随对应阶段建立；不把尚未创建的文件、依赖或测试描述为已完成。以 WSL2 Ubuntu 为目标开发环境，安装与版本情况以实际检查为准，不因目录规划擅自迁移现有工作区。
 - 当前设计基线为 `docs/README.md` 导航的 V1.1 分拆文档，旧 Word 与历史归档已按用户要求删除，不保留并行版本。读取设计后检查实际实现，不把示例或计划当成已完成的事实。
-- 需求由 `docs/requirements.md` 维护，业务口径由 `docs/domain-model.md` 维护；架构、HTTP、WebSocket、Kafka、数据和可靠性分别以对应专属文档为准。重要决策写入 `docs/decisions/`，阶段分工见 `docs/development-plan.md`，验收追踪见 `docs/verification.md`，实际进度与验证结果写入 `docs/status.md`。修改契约时同步相关设计与验收，不复制出另一份定义。
+- 需求由 `docs/design/requirements.md` 维护，业务口径由 `docs/design/domain-model.md` 维护；架构、HTTP、WebSocket、Kafka、数据和可靠性分别以对应专属设计为准。重要选择及边界直接写入相关设计，不再单独建立学习记录、决策记录或项目讲解文档。阶段计划见 `docs/development-plan.md`，验收设计见 `docs/verification/plan.md`，详细执行结果放在 `docs/verification/reports/`；`docs/status.md` 只保留当前进度、待解决问题、下一步和报告入口。修改契约时同步相关设计与验收，不复制出另一份定义。
 - 只要求读取实际存在且相关的文件。缺少模板、Skill 或状态文件不应阻塞无关的常规任务。
 
 ## 参考项目的使用
@@ -29,7 +29,7 @@
 - 参考项目源码审查与吸收记录位于 [docs/reviews/live-stream-danmaku-review.md](docs/reviews/live-stream-danmaku-review.md)，保存来源、源码证据、可借鉴思路、问题及改进。进入相关阶段时按 [开发计划](docs/development-plan.md) 阅读对应 REF/ISSUE 条目，不要求每次任务重读整个参考项目。
 - 从业务场景、约束与失败路径出发提炼原理，自行设计和实现；不整套照搬目录、框架、参数或代码。明确采用、改造、延后或不采用的理由，性能优化须先有测量依据。
 - 审查记录是设计依据，协议、资源参数及一致性规则仍以各专属设计为准。需要改变契约时同步其维护文档和验收，不能只修改审查记录形成另一套定义。
-- 区分源码事实、静态推导、待验证方案与实测结果；不把参考项目宣传指标或我们的改进计划写成已有能力。相关实现完成后在项目状态或阶段记录关联 REF/ISSUE、代码及实际验收证据。
+- 区分源码事实、静态推导、待验证方案与实测结果；不把参考项目宣传指标或我们的改进计划写成已有能力。相关实现完成后在验证报告关联 REF/ISSUE、代码及实际验收证据，由项目状态链接。
 - 参考目录只作阅读资料，不作为我们的构建或运行依赖；副本缺失时使用已记录证据和当前契约继续工作，源码变化时重新核对相关结论。详细问题清单放在审查文档，AGENTS 只维护使用规则。
 
 ## 开始任务
@@ -74,8 +74,8 @@
 - 广播队列有界，明确慢客户端的丢弃或断开策略，不能让单个客户端阻塞整个房间。
 - 第一版在线人数表示单个 API Server 管理的有效 WebSocket 连接数，不等同于去重用户数或累计访问人数。
 - 断线清理和连接关闭应可重复调用而不重复减计数。多实例在线状态和广播方式须另行设计，不提前引入分布式部署。
-- 浏览器通过 Bearer HTTP 换取一次性房间票据，再完成 WebSocket 握手；访问令牌、票据及连接到期规则按 `docs/api-spec.md` 和 `docs/websocket-protocol.md` 执行。
-- V1 不建立 `room_members` 表，连接状态由 RoomHub 管理。关闭房间与在途请求的边界按 `docs/domain-model.md` 执行。
+- 浏览器通过 Bearer HTTP 换取一次性房间票据，再完成 WebSocket 握手；访问令牌、票据及连接到期规则按 `docs/design/api-spec.md` 和 `docs/design/websocket-protocol.md` 执行。
+- V1 不建立 `room_members` 表，连接状态由 RoomHub 管理。关闭房间与在途请求的边界按 `docs/design/domain-model.md` 执行。
 
 ## Kafka Redis 与一致性
 
@@ -87,7 +87,7 @@
 - Redis 去重判断与计数递增必须原子执行，明确 Key 命名、过期策略、重试和故障恢复方式。
 - 明确有界重试、退避、异常消息处置和消费恢复行为；不宣称端到端 Exactly Once，也不保证离线 WebSocket 用户必达。
 - 本地单 Broker 配置不具备多副本容灾能力；性能和可靠性结论必须与实际配置、测试证据一致。
-- 请求窗口、稳定事件标识、结果未知、Redis 投影恢复及异常事件隔离统一遵循 `docs/reliability.md`；禁止清空计数后从已提交位移继续运行，或未经恢复流程回退实时消费位移。
+- 请求窗口、稳定事件标识、结果未知、Redis 投影恢复及异常事件隔离统一遵循 `docs/design/reliability.md`；禁止清空计数后从已提交位移继续运行，或未经恢复流程回退实时消费位移。
 
 ## 验证要求
 
@@ -100,16 +100,16 @@
 - Compose 修改：确认配置存在后，在仓库根目录执行 `docker compose -f deployments/docker/compose.yaml config --quiet`；配置校验不等于服务已启动。
 - 纯文档和规则修改检查内容、引用路径与 Diff，不机械运行尚不存在的业务测试。
 - 区分“通过”“失败”“未运行”“不适用”，说明无法运行的原因。未经实际执行，不声称测试、环境配置或性能目标已完成。
-- 用户要求面向项目复盘和面试追问组织开发：每阶段关键设计须说明场景、约束、替代方案与取舍、模块及一致性边界、故障检测与恢复条件，并关联实际实现和验证证据。具体交付方式见 `docs/project-explanation.md`，指标口径见 `docs/verification.md`。
+- 每阶段关键设计须说明场景、约束、替代方案与取舍、模块及一致性边界、故障检测与恢复条件，并关联实际实现和验证证据；这些内容分别维护在相关设计和阶段验证报告中。指标口径见 `docs/verification/plan.md`，原始证据缺失时明确标注，不把历史记录当作本轮复测。
 - 指标区分业务目标、保护阈值和实测结果；数据附带环境、负载、统计口径和可复现命令。配置上限不作为实测容量，模拟故障不作为生产经历，未测量不填写虚构成绩。
 
 ## Git 与任务交付
 
 - `main` 保持稳定；每项任务从更新后的 `main` 建立一个任务分支，同一任务允许多次提交和推送，不另设无必要的分支体系。
 - 提交前审查 Diff 和暂存文件，排除真实凭据、构建产物及 Word 临时锁文件；不批量暂存不属于本次任务的内容。
-- 教学交付须完成实现、必要检查和讲解，提供可操作的流程与代码阅读入口；常规检查由助手执行，不要求用户逐条重复。按用户本次明确提供的工程规则，提交与推送不再等待额外确认，测试通过也不替代用户对项目的学习和审阅。
+- 交付须完成实现、必要检查和说明，提供运行入口与相关代码路径；常规检查由助手执行，不要求用户逐条重复。提交与推送按已有授权执行，检查通过不替代用户对项目的审阅；不再要求额外编写学习或复盘文档。
 - 用户已持续授权：每次完成一轮修改并完成适用检查后，必须创建 Git 提交并推送到当前工作分支对应的 `origin` 远程分支，无需再次请求确认；新分支首次推送时建立 upstream。提交仅包含本轮及此前同一任务已授权的相关改动。若推送失败，保留本地提交并如实报告原因，继续处理可解决的问题。
 - 用户已确认采用任务分支与 PR 工作流：任务完成后创建指向 `main` 的 PR，说明改动与实际验证；检查通过且满足仓库合并要求后，按任务授权合并并同步本地 `main`。PR 创建、合并及同步状态须实际核对，不把分支推送成功等同于主干已更新。
 - 提交、推送、合并和部署按各自已有授权执行，不把完成编码等同于允许发布。
 - 交付时简要说明实现行为、主要文件、实际验证结果、剩余问题，以及提交或推送状态。
-- 必要时更新相关协议、决策和进度文件；Skills 随真实的重复流程建立，不为了凑齐模板提前创建大量文件。
+- 必要时更新相关设计、验证报告和当前状态；Skills 随真实的重复流程建立，不为了凑齐模板提前创建大量文件。

@@ -1,6 +1,6 @@
 # LiveStream 数据模型与存储设计
 
-基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms 与迁移版本表，事件表和 Redis 键仍为后续设计；实际执行结果见 [项目状态](status.md)。
+基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms 与迁移版本表，事件表和 Redis 键仍为后续设计；实际执行结果见 [项目状态](../status.md)。
 
 ## 通用约定
 
@@ -8,7 +8,7 @@ MySQL 使用 InnoDB、utf8mb4，业务时间以 UTC DATETIME(3) 存储。业务�
 
 外键限定为 RESTRICT，不级联删除事件；V1 不提供删除用户、房间或历史事件功能。所有 SQL 参数化。历史页按房间与 id 查询，不执行无上限全表返回。
 
-MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository。模型按本文及已应用迁移映射，不因引入 GORM 就增加软删除列或其他未设计字段；采用显式字段，避免直接嵌入 gorm.Model 改变表定义。表结构由 Migration 管理，启动不调用 AutoMigrate。框架不会代替用户名唯一约束、事务边界或消费幂等设计；选型见 [GORM 决策](decisions/0004-gorm-database-access.md)。
+MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository。模型按本文及已应用迁移映射，不因引入 GORM 就增加软删除列或其他未设计字段；采用显式字段，避免直接嵌入 gorm.Model 改变表定义。表结构由 Migration 管理，启动不调用 AutoMigrate。框架不会代替用户名唯一约束、事务边界或消费幂等设计。
 
 ## 业务表
 
@@ -78,15 +78,15 @@ V1 MySQL 业务历史不自动清理。Redis 旧 epoch 仅在恢复验证、切�
 
 ## 迁移与版本
 
-唯一日常入口是在 backend 目录执行 `go run ./cmd/migrate`。命令通过 GORM 连接目标数据库，按版本执行、成功记录、失败停止；目标库本身由 Compose 初始化。调度逻辑位于 [migrate.go](../backend/migrations/migrate.go)，只在独立命令中调用，不随 API 启动执行。
+唯一日常入口是在 backend 目录执行 `go run ./cmd/migrate`。命令通过 GORM 连接目标数据库，按版本执行、成功记录、失败停止；目标库本身由 Compose 初始化。调度逻辑位于 [migrate.go](../../backend/migrations/migrate.go)，只在独立命令中调用，不随 API 启动执行。
 
 schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETIME(3)，只保存成功版本和执行时间。首次执行时用 GORM 创建该记录表；成功记录必须从 1 连续递增，拒绝缺号或高于程序所支持版本的记录。已成功版本直接跳过，保留原 applied_at，不重新建表或覆盖用户数据。
 
 | 版本 | 固定迁移步骤 | 前置条件与结果 |
 | --- | --- | --- |
-| 1 | [000001_create_users.go](../backend/migrations/000001_create_users.go) 使用固定 userV1 模型与 Migrator.CreateTable 建立 users | 无成功版本且不存在 users；完成后登记 1，不复用未来会变化的业务模型 |
-| 2 | [000002_tighten_username_check.go](../backend/migrations/000002_tighten_username_check.go) 通过 GORM.Exec 原子替换用户名 CHECK | 已成功执行 1；校验长度、字母开头及非法字符，完成后登记 2 |
-| 3 | [000003_create_live_rooms.go](../backend/migrations/000003_create_live_rooms.go) 使用固定 roomV3 建立 live_rooms、两项组合索引、房主外键和状态 CHECK | 已成功执行 2；只新增房间表，保留用户与旧成功记录，完成后登记 3 |
+| 1 | [000001_create_users.go](../../backend/migrations/000001_create_users.go) 使用固定 userV1 模型与 Migrator.CreateTable 建立 users | 无成功版本且不存在 users；完成后登记 1，不复用未来会变化的业务模型 |
+| 2 | [000002_tighten_username_check.go](../../backend/migrations/000002_tighten_username_check.go) 通过 GORM.Exec 原子替换用户名 CHECK | 已成功执行 1；校验长度、字母开头及非法字符，完成后登记 2 |
+| 3 | [000003_create_live_rooms.go](../../backend/migrations/000003_create_live_rooms.go) 使用固定 roomV3 建立 live_rooms、两项组合索引、房主外键和状态 CHECK | 已成功执行 2；只新增房间表，保留用户与旧成功记录，完成后登记 3 |
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
@@ -100,4 +100,4 @@ MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体�
 
 按 P1b 用户、P2 房间、P6 事件及恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/schema.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
 
-API 和 Worker 正常启动只校验所需迁移版本，不隐含执行删表、清库或重建；Migration 与开发数据清理有独立入口和明确操作说明。重启前后已有数据及迁移版本应保持，按 [ENV-03](verification.md) 逐阶段验证。该约束对应参考项目启动删表问题，证据见 [ISSUE-01](reviews/live-stream-danmaku-review.md)。
+API 和 Worker 正常启动只校验所需迁移版本，不隐含执行删表、清库或重建；Migration 与开发数据清理有独立入口和明确操作说明。重启前后已有数据及迁移版本应保持，按 [ENV-03](../verification/plan.md) 逐阶段验证。该约束对应参考项目启动删表问题，证据见 [ISSUE-01](../reviews/live-stream-danmaku-review.md)。

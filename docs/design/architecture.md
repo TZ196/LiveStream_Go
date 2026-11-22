@@ -6,11 +6,11 @@
 
 HTTP 使用 CloudWeGo Hertz；WebSocket 使用 Gorilla WebSocket，经 Hertz HTTP Adaptor 接入。前端使用 Vue 3、TypeScript、Vite 和 Composition API。MySQL 8.4 保存业务与事件，Redis 7 保存实时投影、限流和请求幂等记录，Kafka 缓冲事件。
 
-MySQL 访问统一使用 GORM。基础设施层由 GORM 创建连接池，再设置容量与管理生命周期；Repository 使用 GORM 完成业务查询和事务，Service 维护业务规则；Hertz 请求对象不进入数据访问层。结构变更通过独立的 GORM 迁移命令按版本执行，具体取舍见 [GORM 决策](decisions/0004-gorm-database-access.md)。
+MySQL 访问统一使用 GORM。基础设施层由 GORM 创建连接池，再设置容量与管理生命周期；Repository 使用 GORM 完成业务查询和事务，Service 维护业务规则；Hertz 请求对象不进入数据访问层。结构变更通过独立的 GORM 迁移命令按版本执行，执行与恢复边界见 [数据设计](database.md#迁移与版本)。
 
 该 WebSocket 接入组合有 [Hertz 官方支持](https://www.cloudwego.io/zh/docs/hertz/tutorials/third-party/protocol/websocket/)。依赖补丁版本在对应阶段锁定，设计选型不代表运行性能已经验证。
 
-P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport 显式指定。该实现将监听错误返回给启动入口，便于统一处理端口冲突；选择理由与验证见 [首步学习记录](learning/01-minimal-http-server.md)。网络实现的性能差异尚未测量，后续 WebSocket 接入仍需单独验证。
+P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport 显式指定。该实现将监听错误返回给启动入口，便于统一处理端口冲突；验证结果见 [P1a 报告](../verification/reports/p1a.md)。网络实现的性能差异尚未测量，后续 WebSocket 接入仍需单独验证。
 
 ## 进程和数据流
 
@@ -39,11 +39,11 @@ RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房
 
 业务 Handler 和 Repository 之间不能绕过 Service。存活探针不访问业务数据；就绪探针调用 internal/database 的只读结构检查，不读取用户记录，不需要空的业务 Service 或 Repository。Hertz RequestContext 留在接入层，不进入业务与数据访问层。消息发布由 EventPublisher 边界承接，阶段演进替换实现，不让前端或 RoomHub 感知 Kafka SDK。
 
-当前 P1b 在 cmd/api 中组装 GORM → User Repository → User Service，并创建独立的 JWT 签发/校验组件，随后传入 HTTP 模块。Handler 负责 JSON 校验与错误映射；Service 完成密码校验后，登录 Handler 使用令牌组件签发 JWT。当前用户 Handler 只使用中间件验签得到的身份调用 Service。前端登录后实际查询 users/me，再展示账号；退出仅清理页面内存。调用顺序和失败路径见 [第五步学习记录](learning/05-user-authentication.md)。
+P1b 在 cmd/api 中组装 GORM → User Repository → User Service，并创建独立的 JWT 签发/校验组件，随后传入 HTTP 模块。Handler 负责 JSON 校验与错误映射；Service 完成密码校验后，登录 Handler 使用令牌组件签发 JWT。当前用户 Handler 只使用中间件验签得到的身份调用 Service。前端登录后实际查询 users/me，再展示账号；退出仅清理页面内存。
 
-P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 负责读取登录身份，Service 检查房主权限，Repository 以条件更新保证重复关闭不改写时间；列表按 ID 游标查询。房间详情目前只走 HTTP，尚未建立 RoomHub 或实时连接，关闭与在途发送的协调仍按领域规则后续实现。见 [第六步学习记录](learning/06-room-management.md)。
+P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 负责读取登录身份，Service 检查房主权限，Repository 以条件更新保证重复关闭不改写时间；列表按 ID 游标查询。房间详情目前只走 HTTP，尚未建立 RoomHub 或实时连接，关闭与在途发送的协调仍按领域规则后续实现。
 
-参考实现中 Manager 的外部 I/O 可拖住连接注册和注销，见 [审查 ISSUE-05](reviews/live-stream-danmaku-review.md)。消息分发层只解析和校验传输 DTO，再调用业务 Service；数据库 Model 不直接承担 WS 请求或事件契约。外部发布在房间锁之外执行，并受取消、超时和并发预算约束。
+参考实现中 Manager 的外部 I/O 可拖住连接注册和注销，见 [审查 ISSUE-05](../reviews/live-stream-danmaku-review.md)。消息分发层只解析和校验传输 DTO，再调用业务 Service；数据库 Model 不直接承担 WS 请求或事件契约。外部发布在房间锁之外执行，并受取消、超时和并发预算约束。
 
 ## 目标目录
 
@@ -86,7 +86,7 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 
 每连接一个业务读循环和一个业务写循环；所有 ACK、错误、广播进入写队列。队列满或写超时则关闭该慢连接，不阻塞整房间。不要将每条消息转换成无上限 goroutine。RoomHub 移除连接、房间关闭和进程退出共享幂等清理路径。Gorilla 对并发读写的限制见 [包文档](https://pkg.go.dev/github.com/gorilla/websocket#hdr-Concurrency)。
 
-RoomHub 广播采用短临界区复制连接引用，再在锁外尝试入队；快照不延长连接的业务有效期，发送与退出竞态通过退出状态及幂等清理处理。按分发顺序向同房间连接入队，不让共享 Worker 池并行处理该房间相邻消息。该思路对应 [REF-03 与 ISSUE-07](reviews/live-stream-danmaku-review.md)；对象池等分配优化待有测量依据再引入。
+RoomHub 广播采用短临界区复制连接引用，再在锁外尝试入队；快照不延长连接的业务有效期，发送与退出竞态通过退出状态及幂等清理处理。按分发顺序向同房间连接入队，不让共享 Worker 池并行处理该房间相邻消息。该思路对应 [REF-03 与 ISSUE-07](../reviews/live-stream-danmaku-review.md)；对象池等分配优化待有测量依据再引入。
 
 房间内业务顺序以 Kafka 分区日志顺序为准，不能解释为多个浏览器墙钟时间的全序。每分区串行处理批次，先实现正确的连续提交，再考虑并行优化。
 
@@ -98,4 +98,4 @@ RoomHub 广播采用短临界区复制连接引用，再在锁外尝试入队；
 
 迁移入口复用 LoadMySQL 和 database.Open，但不要求目标库已有业务表；随后由 migrations.Run 取得数据库命名锁、读取连续成功版本、顺序执行缺少的步骤。每个版本完成后才登记成功，任一步失败立即返回；结束时释放锁并关闭连接池。它是一次性维护命令，不是第三个常驻服务；API 与未来 Worker 不隐含执行它。
 
-日志关联 request_id、event_id、room_id、分区和位移；禁止记录密码、Bearer、原始握手票据。记录连接数、队列占用、接受延迟、广播延迟、持久化延迟、消费者积压、重复事件和隔离事件。完整指标验证见 [验证设计](verification.md)。
+日志关联 request_id、event_id、room_id、分区和位移；禁止记录密码、Bearer、原始握手票据。记录连接数、队列占用、接受延迟、广播延迟、持久化延迟、消费者积压、重复事件和隔离事件。完整指标验证见 [验证设计](../verification/plan.md)。
