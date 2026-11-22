@@ -59,3 +59,7 @@ export async function getRoom(token: string, id: string, signal: AbortSignal): P
 export async function closeRoom(token: string, id: string, signal: AbortSignal): Promise<Room> {
   return readRoom(await request(`/api/v1/rooms/${encodeURIComponent(id)}/close`, { method: 'POST', body: {}, token, signal }))
 }
+
+export async function reopenRoom(token: string, id: string, signal: AbortSignal): Promise<Room> {
+  return readRoom(await request(`/api/v1/rooms/${encodeURIComponent(id)}/reopen`, { method: 'POST', body: {}, token, signal }))
+}

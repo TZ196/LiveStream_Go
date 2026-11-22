@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -59,14 +60,35 @@ func (r *Repository) List(ctx context.Context, options ListOptions, beforeID uin
 	return rooms, err
 }
 
-func (r *Repository) Close(ctx context.Context, id, ownerID uint64, closedAt time.Time) (Room, error) {
-	// 条件更新只允许 OPEN -> CLOSED；并发或重复关闭不会覆盖第一次的时间。
-	query := r.db.WithContext(ctx).Model(&Room{})
-	query = query.Where("id = ? AND owner_id = ? AND status = ?", id, ownerID, Open)
-	err := query.Updates(map[string]any{"status": Closed, "closed_at": closedAt}).Error
-	if err != nil {
-		return Room{}, err
-	}
-	// V1 不允许删除房间、转移所有者或重开，因此关闭后的状态不会倒退。
-	return r.FindByID(ctx, id)
+func (r *Repository) SetStatus(ctx context.Context, id, ownerID uint64, status string) (Room, error) {
+	var room Room
+	// GORM 在事务内调用此函数，失败自动回滚；行锁使同一房间的开播与关闭依次执行。
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx.Clauses(clause.Locking{Strength: "UPDATE"})
+		err := query.Where("id = ? AND owner_id = ?", id, ownerID).Take(&room).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		// 同方向重试不改变状态，也不覆盖本轮直播的关闭时间。
+		if room.Status == status {
+			return nil
+		}
+		var closedAt *time.Time
+		if status == Closed {
+			now := time.Now().UTC().Truncate(time.Millisecond)
+			closedAt = &now
+		}
+		values := map[string]any{"status": status, "closed_at": closedAt}
+		if err := tx.Model(&Room{}).Where("id = ?", id).Updates(values).Error; err != nil {
+			return err
+		}
+		// 返回本次事务完成的状态，避免提交后重查时读到另一请求刚修改的状态。
+		room.Status = status
+		room.ClosedAt = closedAt
+		return nil
+	})
+	return room, err
 }

@@ -63,7 +63,7 @@ onBeforeUnmount(() => controller?.abort())
       <button type="button" class="retry-button" :disabled="checking" @click="refreshAccount">
         {{ checking ? '正在更新…' : '刷新账号信息' }}
       </button>
-      <p class="account-notice">登录有效期为 30 分钟。退出、刷新或关闭当前页面后，请重新登录。</p>
+      <p class="account-notice">登录有效期为 30 分钟，刷新页面不会延长有效期。到期或主动退出后需要重新登录。</p>
     </section>
   </section>
 </template>

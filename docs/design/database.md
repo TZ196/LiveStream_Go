@@ -21,6 +21,8 @@ MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository
 
 表内业务字段除明确可空项外均为 NOT NULL。CHECK 约束确保 OPEN 的 closed_at 为空、CLOSED 的 closed_at 非空。接口校验不代替唯一约束和数据库事务。
 
+live_rooms 支持反复开播和结束直播。closed_at 表示当前 CLOSED 状态对应的结束时间，重开时清空，下次结束时重新设置；不保存各轮开播历史。转换在同一事务中使用 SELECT FOR UPDATE 锁定房间，更新后返回该事务的结果，不在提交后重查。现有版本 3 的结构及 CHECK 已支持该转换，本次不新增迁移、不改写历史迁移。
+
 当前 users 的 username 使用 ASCII 字符集、ascii_bin 排序和唯一索引；CHECK 限定 3–32 位小写 ASCII 字母、数字、下划线且首位为字母。User Service 按领域模型规范化输入，Repository 通过 GORM 写入，数据库唯一约束裁决并发同名注册。password_hash 保存包含参数、随机盐和输出的 Argon2id 编码；不保存明文密码。账号认证复用现有四列，未新增迁移或修改结构版本。
 
 V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理；点赞汇总从 Redis 读取，恢复时从 interaction_events 唯一事件汇总。避免建立没有业务生命周期定义的成员或统计副本。

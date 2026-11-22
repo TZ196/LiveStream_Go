@@ -12,7 +12,7 @@ import (
 var (
 	ErrInvalidTitle = errors.New("房间标题去除首尾空白后须为 1–80 个字符")
 	ErrInvalidList  = errors.New("房间状态须为 OPEN 或 CLOSED，每页条数须为 1–100")
-	ErrForbidden    = errors.New("只有房主可以关闭直播间")
+	ErrForbidden    = errors.New("只有房主可以开播或结束直播")
 	ErrUnavailable  = errors.New("数据库暂不可用")
 )
 
@@ -89,11 +89,22 @@ func (s *Service) Close(ctx context.Context, id, userID uint64) (Room, error) {
 	if room.OwnerID != userID {
 		return Room{}, ErrForbidden
 	}
-	if room.Status == Closed {
-		return room, nil
+	room, err = s.repository.SetStatus(ctx, id, userID, Closed)
+	if err != nil {
+		return Room{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	closedAt := time.Now().UTC().Truncate(time.Millisecond)
-	room, err = s.repository.Close(ctx, id, userID, closedAt)
+	return room, nil
+}
+
+func (s *Service) Reopen(ctx context.Context, id, userID uint64) (Room, error) {
+	room, err := s.Get(ctx, id)
+	if err != nil {
+		return Room{}, err
+	}
+	if room.OwnerID != userID {
+		return Room{}, ErrForbidden
+	}
+	room, err = s.repository.SetStatus(ctx, id, userID, Open)
 	if err != nil {
 		return Room{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}

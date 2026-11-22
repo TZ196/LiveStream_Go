@@ -52,7 +52,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible {
   letter-spacing: -0.03em;
 }
 
-.site-description, .field-help, .health-note {
+.site-description, .field-help {
   color: #52666a;
   font-size: 0.875rem;
 }
@@ -231,45 +231,6 @@ input:focus {
 .danger-button:hover:enabled { color: #872315; border-color: #a33324; }
 
 
-/* 开发检查独立于账号表单，收起面板不会重新创建请求。 */
-.health-panel {
-  margin-top: 3rem;
-  padding: 1rem 1.25rem;
-  background: #edf3f2;
-  border: 1px solid #dce5e4;
-  border-radius: 0.75rem;
-}
-
-.health-panel summary {
-  cursor: pointer;
-  font-size: 0.875rem;
-  font-weight: 600;
-}
-
-.health-content {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1rem;
-  margin-top: 0.75rem;
-}
-
-.health-message {
-  margin: 0;
-}
-
-.health-message[data-state="online"] {
-  color: #04674c;
-}
-
-.health-message[data-state="offline"] {
-  color: #a33324;
-}
-
-.health-note {
-  margin: 0.25rem 0 0;
-}
-
 .retry-button {
   flex-shrink: 0;
   padding: 0.5rem 0.8rem;
@@ -323,14 +284,5 @@ input:focus {
   .account-details div { grid-template-columns: 1fr; gap: 0.25rem; }
   .room-grid { grid-template-columns: 1fr; }
   .room-create-fields { align-items: stretch; flex-direction: column; }
-
-  .health-panel {
-    margin-top: 2rem;
-  }
-
-  .health-content {
-    flex-direction: column;
-    align-items: flex-start;
-  }
 
 }
