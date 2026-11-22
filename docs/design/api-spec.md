@@ -42,7 +42,7 @@
 | GET /api/v1/rooms/{id} | 无 | Room，200 | 包含关闭房间 |
 | POST /api/v1/rooms/{id}/close | 空 JSON 对象 | Room，200 | 仅房主结束本轮直播；连续重复关闭保留本轮 closed_at |
 | POST /api/v1/rooms/{id}/reopen | 空 JSON 对象 | Room，200 | 仅房主；原房间恢复 OPEN，closed_at=null；已 OPEN 时返回当前房间 |
-| POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path，201 | 仅开放房间；规则见下文 |
+| POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path、session_id，201 | 仅开放房间；规则见下文 |
 | GET /api/v1/rooms/{id}/danmaku | limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | P6 起；已落库数据按 id 倒序 |
 | GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
 
@@ -80,7 +80,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 }
 ```
 
-RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like_count 指向同一指定场次，旧场统计不可直接并入新场。当前接口及场次模型均未实现。P3 尚无点赞或投影恢复期间，like_count、projection_epoch、likes_revision 为 null，likes_available=false，在线数仍可返回；前端显示“统计暂不可用”。已初始化的零计数返回字符串 "0" 和有效投影版本。
+RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like_count 指向同一指定场次，旧场统计不可直接并入新场。当前场次模型与点赞 WebSocket 已实现，统计 HTTP 接口仍未实现。P3 尚无点赞或投影恢复期间，like_count、projection_epoch、likes_revision 为 null，likes_available=false，在线数仍可返回；前端显示“统计暂不可用”。已初始化的零计数返回字符串 "0" 和有效投影版本。
 
 ## 分页
 
@@ -103,7 +103,7 @@ RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like
 | 501 | CAPABILITY_NOT_ENABLED | 当前阶段尚未交付该能力 |
 | 500 | INTERNAL_ERROR | 保留 trace_id，不返回内部堆栈 |
 
-P2 已实现创建、列表、详情、关闭、重新开播五个房间接口，均要求 Bearer 认证；输入未知字段、重复查询参数和非法 ID 被拒绝。房间票据、统计和历史接口仍为后续阶段契约。
+当前已实现创建、列表、详情、关闭、重新开播和房间票据接口，均要求 Bearer 认证；统计和历史接口仍未实现。
 
 数据库、Redis 故障不得返回 200 加伪造成功值。历史功能在 P6 之前明确返回 CAPABILITY_NOT_ENABLED。握手票据错误对应的握手响应见 WebSocket 协议。
 
@@ -111,7 +111,7 @@ P2 已实现创建、列表、详情、关闭、重新开播五个房间接口�
 
 GET /healthz 返回 200、JSON 响应 {"status":"ok"} 和 Cache-Control: no-store，仅检查进程能否响应，不访问中间件。不支持的方法返回 405。
 
-GET /readyz 返回 JSON 和 Cache-Control: no-store。当前 P2 数据库接入后的响应字段如下：
+GET /readyz 返回 JSON 和 Cache-Control: no-store。未启用点赞时为 P2；启用点赞时 stage 为 P4-likes，dependencies 除 mysql 外检查 redis、kafka 和 realtime_consumer，任一不可用返回 503。该探针不检查独立 Worker，不能证明消息已落库。下表保留 P2 模式说明：
 
 | 字段 | 当前含义 |
 | --- | --- |

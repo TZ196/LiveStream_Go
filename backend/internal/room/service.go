@@ -110,3 +110,15 @@ func (s *Service) Reopen(ctx context.Context, id, userID uint64) (Room, error) {
 	}
 	return room, nil
 }
+
+// ActiveSession 返回指定开放房间的当前场次。
+func (s *Service) ActiveSession(ctx context.Context, roomID uint64) (Session, error) {
+	value, err := s.Get(ctx, roomID)
+	if err != nil {
+		return Session{}, err
+	}
+	if value.Status != Open {
+		return Session{}, errors.New("直播间已关闭")
+	}
+	return s.repository.ActiveSession(ctx, roomID)
+}

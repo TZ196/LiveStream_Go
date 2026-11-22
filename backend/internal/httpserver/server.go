@@ -9,6 +9,7 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
+	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -28,13 +29,15 @@ const (
 
 // Server 保存 Hertz 实例、日志工具、GORM 数据库实例和当前就绪状态。
 type Server struct {
-	Hertz  *server.Hertz
-	logger *slog.Logger
-	db     *gorm.DB
-	users  *user.Service
-	rooms  *room.Service
-	tokens *auth.Tokens
-	limit  *authLimiter
+	Hertz    *server.Hertz
+	logger   *slog.Logger
+	db       *gorm.DB
+	users    *user.Service
+	rooms    *room.Service
+	tokens   *auth.Tokens
+	realtime *realtime.Manager
+	wsOrigin string
+	limit    *authLimiter
 	// 请求处理和退出流程会同时访问状态，使用原子变量避免并发读写冲突。
 	state atomic.Int32
 }
@@ -135,12 +138,45 @@ func (s *Server) readiness(ctx context.Context, c *app.RequestContext) {
 		status = "stopping"
 		statusCode = consts.StatusServiceUnavailable
 	}
+	dependencies := map[string]string{"mysql": mysqlStatus}
+	stage := Stage
+	recovery := "not_applicable"
+	if s.realtime != nil {
+		stage = "P4-likes"
+		recovery = "ready"
+		check, cancel := context.WithTimeout(ctx, time.Second)
+		redisReady, kafkaReady, consumerReady := s.realtime.Health(check)
+		cancel()
+		dependencies["redis"] = "unavailable"
+		dependencies["kafka"] = "unavailable"
+		dependencies["realtime_consumer"] = "paused"
+		if redisReady {
+			dependencies["redis"] = "ready"
+		}
+		if kafkaReady {
+			dependencies["kafka"] = "ready"
+		}
+		if consumerReady {
+			dependencies["realtime_consumer"] = "ready"
+		}
+		if !redisReady || !kafkaReady || !consumerReady {
+			recovery = "degraded"
+			if status != "stopping" {
+				status = "not_ready"
+				statusCode = consts.StatusServiceUnavailable
+			}
+		}
+	}
+	if s.state.Load() == stateStopping {
+		status = "stopping"
+		statusCode = consts.StatusServiceUnavailable
+	}
 	// 仅返回依赖状态，不向客户端暴露数据库地址、账号或原始错误。
 	response := readinessResponse{
 		Status:       status,
-		Stage:        Stage,
-		Dependencies: map[string]string{"mysql": mysqlStatus},
-		Recovery:     "not_applicable",
+		Stage:        stage,
+		Dependencies: dependencies,
+		Recovery:     recovery,
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(statusCode, response)

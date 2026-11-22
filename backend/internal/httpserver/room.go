@@ -188,10 +188,17 @@ func (s *Server) closeRoom(ctx context.Context, c *app.RequestContext) {
 	if !readRoomObject(c, &input) {
 		return
 	}
+	if s.realtime != nil {
+		s.realtime.LockAdmission()
+		defer s.realtime.UnlockAdmission()
+	}
 	value, err := s.rooms.Close(ctx, id, identity.UserID)
 	if err != nil {
 		s.roomError(ctx, c, err)
 		return
+	}
+	if s.realtime != nil {
+		s.realtime.CloseRoom(id)
 	}
 	writeData(c, 200, publicRoom(value))
 }
@@ -208,6 +215,10 @@ func (s *Server) reopenRoom(ctx context.Context, c *app.RequestContext) {
 	var input struct{}
 	if !readRoomObject(c, &input) {
 		return
+	}
+	if s.realtime != nil {
+		s.realtime.LockAdmission()
+		defer s.realtime.UnlockAdmission()
 	}
 	value, err := s.rooms.Reopen(ctx, id, identity.UserID)
 	if err != nil {

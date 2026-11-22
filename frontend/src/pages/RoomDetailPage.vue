@@ -2,10 +2,12 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { closeRoom, getRoom, reopenRoom, type Room } from '../api/rooms'
 import { ApiError } from '../api/http'
+import { useRoomLikes } from '../likes'
 
 const props = defineProps<{ token: string; userId: string; roomId: string }>()
 const emit = defineEmits<{ back: []; expired: [] }>()
 const room = ref<Room>()
+const { connected: likeConnected, likeCount, pendingCount, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
 const busy = ref(false)
 const confirming = ref(false)
 const needsRefresh = ref(false)
@@ -24,6 +26,7 @@ async function loadRoom() {
     const value = await getRoom(props.token, props.roomId, attempt.signal)
     if (attempt.signal.aborted) return
     room.value = value
+    if (value.status === 'OPEN') startLikes(); else stopLikes()
     confirming.value = false
     needsRefresh.value = false
   } catch (error) {
@@ -46,7 +49,10 @@ async function changeStatus(action: 'close' | 'reopen') {
     const value = action === 'close'
       ? await closeRoom(props.token, props.roomId, attempt.signal)
       : await reopenRoom(props.token, props.roomId, attempt.signal)
-    if (!attempt.signal.aborted) room.value = value
+    if (!attempt.signal.aborted) {
+      room.value = value
+      if (value.status === 'OPEN') startLikes(); else stopLikes()
+    }
   } catch (error) {
     if (attempt.signal.aborted) return
     if (error instanceof ApiError && error.status === 401) emit('expired')
@@ -63,7 +69,7 @@ async function changeStatus(action: 'close' | 'reopen') {
 }
 
 onMounted(() => { void loadRoom() })
-onBeforeUnmount(() => controller?.abort())
+onBeforeUnmount(() => { controller?.abort(); stopLikes() })
 </script>
 
 <template>
@@ -83,7 +89,13 @@ onBeforeUnmount(() => controller?.abort())
         <div><dt>创建时间</dt><dd>{{ formatDate(room.created_at) }}</dd></div>
         <div v-if="room.closed_at"><dt>本次结束时间</dt><dd>{{ formatDate(room.closed_at) }}</dd></div>
       </dl>
-      <p class="account-notice">{{ room.status === 'CLOSED' ? '本次直播已结束，房主可以在这个房间重新开播。' : '房间已开放，点赞与弹幕功能即将接入。' }}</p>
+      <p class="account-notice">{{ room.status === 'CLOSED' ? '本次直播已结束，房主可以在这个房间重新开播。' : '房间已开放，欢迎点赞。' }}</p>
+      <div v-if="room.status === 'OPEN'" class="room-actions">
+        <button class="retry-button" type="button" :disabled="!likeConnected || pendingCount >= 100" @click="like">点赞</button>
+        <span>本场点赞：{{ likeCount ?? '暂不可用' }}</span>
+        <span v-if="pendingCount">待确认：{{ pendingCount }}</span>
+      </div>
+      <p v-if="likeNotice" role="status">{{ likeNotice }}</p>
       <div v-if="room.owner_id === userId" class="room-close">
         <button v-if="room.status === 'CLOSED'" class="retry-button" type="button" :disabled="busy || needsRefresh" @click="changeStatus('reopen')">重新开播</button>
         <button v-else-if="!confirming" class="retry-button danger-button" type="button" :disabled="busy || needsRefresh" @click="confirming = true">结束直播</button>

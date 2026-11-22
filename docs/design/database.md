@@ -1,6 +1,6 @@
 # LiveStream 数据模型与存储设计
 
-基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms 与迁移版本表，事件表和 Redis 键仍为后续设计；实际执行结果见 [项目状态](../status.md)。
+基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms、live_sessions、点赞事件、去重、检查点和投影初始化标记；弹幕历史及完整恢复表仍为后续设计；实际执行结果见 [项目状态](../status.md)。
 
 ## 通用约定
 
@@ -16,24 +16,24 @@ MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository
 | --- | --- | --- | --- |
 | users | id；username VARCHAR(32) NOT NULL；password_hash VARCHAR(255) NOT NULL；created_at | PRIMARY(id)，UNIQUE(username) | P1b |
 | live_rooms | id；owner_id 外键 users；title VARCHAR(80)；status VARCHAR(16)，仅 OPEN/CLOSED；created_at；closed_at 可空 | PRIMARY(id)，(status,id)，(owner_id,id) | P2 |
-| live_sessions（待实现） | id；room_id 外键 live_rooms；started_at、ended_at；当前活动状态 | PRIMARY(id)，(room_id,id)；每房间最多一个活动场次，需数据库约束与事务共同保证 | P3 |
+| live_sessions | id；room_id 外键 live_rooms；started_at、ended_at；当前活动状态 | PRIMARY(id)，(room_id,id)；每房间最多一个活动场次，需数据库约束与事务共同保证 | P3 |
 | danmaku_messages | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；username VARCHAR(32) 快照；content VARCHAR(200)；created_at 事件时间；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(room_id,id) | P6 |
-| interaction_events（待实现） | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；event_type，仅 LIKE_CLICKED；created_at；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(session_id,id) | P4 |
+| interaction_events | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；event_type，仅 LIKE_CLICKED；created_at；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(session_id,id) | P4 |
 
 表内业务字段除明确可空项外均为 NOT NULL。CHECK 约束确保 OPEN 的 closed_at 为空、CLOSED 的 closed_at 非空。接口校验不代替唯一约束和数据库事务。
 
-当前实现的 live_rooms 支持反复开播和结束直播。closed_at 表示当前 CLOSED 状态对应的结束时间，重开时清空，下次结束时重新设置；目前不保存各轮开播历史；按新计划，独立 live_sessions 表及每场统计尚待设计迁移和实现。转换在同一事务中使用 SELECT FOR UPDATE 锁定房间，更新后返回该事务的结果，不在提交后重查。现有版本 3 的结构及 CHECK 已支持该转换，本次不新增迁移、不改写历史迁移。
+live_rooms 是长期房间，live_sessions 记录每次独立开播。版本 4 对已有 OPEN 房间建立 started_at 为 NULL 的当前场次，不为 CLOSED 房间补造历史。创建房间、关闭及重新开播在 MySQL 事务中同时维护房间和场次；行锁及活动场次生成列唯一索引共同防止重复开播。历史迁移版本不改写。
 
 当前 users 的 username 使用 ASCII 字符集、ascii_bin 排序和唯一索引；CHECK 限定 3–32 位小写 ASCII 字母、数字、下划线且首位为字母。User Service 按领域模型规范化输入，Repository 通过 GORM 写入，数据库唯一约束裁决并发同名注册。password_hash 保存包含参数、随机盐和输出的 Argon2id 编码；不保存明文密码。账号认证复用现有四列，未新增迁移或修改结构版本。
 
 V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理；点赞汇总从 Redis 读取，恢复时从 interaction_events 唯一事件汇总。避免建立没有业务生命周期定义的成员或统计副本。
 
 
-### 待实现：房间与开播场次
+### 房间与开播场次
 
-`live_rooms` 是长期房间，每次实际从关闭转为开播时新增一个 `live_sessions.id`；首次创建即开播也创建首场。每场记录所属 room_id、开始时间、结束时间及状态；一房间最多一个活动场次。数据库应以唯一约束兜底（例如可空的活动房间生成列及唯一索引），并在同一 MySQL 事务内先锁定房间行、验证状态、创建或结束场次并更新房间状态；重试不得创建第二个活动场次。具体 DDL、状态和值域、索引及失败恢复须在新增迁移前审定。
+`live_rooms` 是长期房间，每次实际从关闭转为开播时新增一个 `live_sessions.id`；首次创建即开播也创建首场。每场记录所属 room_id、开始时间、结束时间及状态；一房间最多一个活动场次。数据库应以唯一约束兜底（例如可空的活动房间生成列及唯一索引），并在同一 MySQL 事务内先锁定房间行、验证状态、创建或结束场次并更新房间状态；重试不得创建第二个活动场次。版本 4 已实现生成列唯一约束、房间行锁及相关事务；详见迁移代码。
 
-旧数据库没有每轮开播记录，不能推断或伪造旧场次的开始、结束和点赞归属；迁移前需盘点已有数据，为已开放房间制定明确的初始场次/未知时间策略和兼容方案。不得修改已成功迁移或直接删除旧数据；API、WS、事件和消费者须一起携带稳定 session_id，旧场迟到事件不增加新场计数。
+旧数据库没有每轮开播记录，不能推断或伪造旧场次的开始、结束和点赞归属；版本 4 为旧的 OPEN 房间创建 started_at 为 NULL 的活动场次，CLOSED 房间不补造历史场次。不得修改已成功迁移或直接删除旧数据；API、WS、事件和消费者须一起携带稳定 session_id，旧场迟到事件不增加新场计数。
 
 点赞持久化表必须对 event_id 建立独立 UNIQUE KEY；新增 session_id 并建立支持单场查询的索引（如 `(session_id, id)`）。为防止事件填写的 room_id 与 session_id 不匹配，目标 DDL 应在 live_sessions 上建立 `(room_id, id)` 唯一键，点赞事件通过 `(room_id, session_id)` 联合外键引用该键；迁移时须验证 MySQL 支持及实际约束行为。去重、业务写入和检查点在同一 MySQL 事务成功后，消费者才提交本组 offset。历史、恢复与现有房间累计语义如何迁移必须先形成可验证的方案，未完成前不能声称支持历史单场统计。
 
@@ -46,7 +46,7 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 | failed_events | topic_id、partition_id、offset、raw_key、raw_payload MEDIUMBLOB、payload_hash、error_code、error_message、status、resolution_details、attempts、first_failed_at、resolved_at 可空 | PRIMARY(topic_id,partition_id,offset)；status 为 OPEN/RESOLVED；保存不超过 64 KiB 的原始值；(status,first_failed_at) 用于处置 |
 | projection_rebuilds | epoch UUID、topic_id、barrier_offsets JSON、status、started_at、completed_at 可空、reason | PRIMARY(epoch)；status 为 PREPARING/READY/FAILED；记录恢复屏障和切换状态 |
 
-点赞消费所需 inbox、检查点和 interaction_events 随 P4 建立；弹幕历史、隔离与完整恢复表按 P5/P6 交付。上述表均为未实现的设计。consumer_inbox 的 event_json 不包含密码、令牌或票据。未知事件保留原始载荷并限制错误摘要长度，禁止将任意大异常或堆栈无限写入。
+点赞消费所需 inbox、检查点和 interaction_events 随 P4 建立；弹幕历史、隔离与完整恢复表按 P5/P6 交付。其中 consumer_inbox、worker_checkpoints 已随版本 4 建立，字段以实际迁移为准；failed_events、projection_rebuilds 仍未实现。consumer_inbox 的 event_json 不包含密码、令牌或票据。未知事件保留原始载荷并限制错误摘要长度，禁止将任意大异常或堆栈无限写入。
 
 隔离记录的 RESOLVED 表示已完成原事件持久化，或经单独人工决策处理了无效记录；resolution_details 必须记录处理方式、依据和是否存在业务损失。合法事件被丢弃仍属于数据不完整，不能据此通过无损恢复验收。不得靠改状态掩盖业务未处理。
 
@@ -98,15 +98,17 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 | 2 | [000002_tighten_username_check.go](../../backend/migrations/000002_tighten_username_check.go) 通过 GORM.Exec 原子替换用户名 CHECK | 已成功执行 1；校验长度、字母开头及非法字符，完成后登记 2 |
 | 3 | [000003_create_live_rooms.go](../../backend/migrations/000003_create_live_rooms.go) 使用固定 roomV3 建立 live_rooms、两项组合索引、房主外键和状态 CHECK | 已成功执行 2；只新增房间表，保留用户与旧成功记录，完成后登记 3 |
 
+| 4 | [000004_create_sessions_likes.go](../../backend/migrations/000004_create_sessions_likes.go) | 新增场次、点赞事件、消费检查点和投影初始化表；旧 OPEN 房间的开始时间保留为未知 |
+
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
-当前工作区只保留上述 Go 迁移文件。独立命令兼容此前 SQL 阶段留下的同一份成功记录：已有版本 1 执行 2、3，已有版本 2 只执行 3，已有版本 3 不再执行结构变更。历史迁移文件未改写。版本 3 无自动删表回滚；建表已生效但登记失败时核对实际结构后受控修复，后续结构调整使用新版本前向修复。旧 API 要求版本 2，数据库升级后需同时使用 P2 API。
+独立迁移命令依次补齐版本 1–4，已成功版本不会重新执行。版本 4 的 MySQL DDL 隐式提交，若中途失败须核对实际表结构并前向修复，不能假称自动回滚；执行前应备份。旧 API 与版本 4 新 API 要求不同，升级数据库后应同时更新 API。
 
 命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
 
 MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体回滚的事务。失败或中断后先检查实际表、约束与成功记录：若某步未生效，修复原因后重试；若 DDL 已生效而记录未写入，须依据该版本逐项核对并完成受控修复后再恢复迁移。命令不会自动接管无版本的已有表、补写版本或回滚删表。不能通过强写版本号、重复整份旧 SQL 或删库重建掩盖失败。[MySQL 隐式提交说明](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)
 
-当前 API 要求成功记录连续且最新版本恰好为 3，并检查 users、live_rooms 所需列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
+当前 API 要求成功记录连续且最新版本恰好为 4，并检查用户、房间、场次和点赞相关表；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
 
 按 P1b 用户、P2 房间、P3 场次、P4 点赞事件、P6 恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/schema.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
 

@@ -27,6 +27,17 @@ func (Room) TableName() string { return "live_rooms" }
 
 var ErrNotFound = errors.New("直播间不存在")
 
+// Session 表示一个房间的一次独立开播；迁移前旧场次的开始时间可能未知。
+type Session struct {
+	ID        uint64 `gorm:"primaryKey"`
+	RoomID    uint64
+	StartedAt *time.Time
+	EndedAt   *time.Time
+}
+
+// TableName 指定场次使用的数据表。
+func (Session) TableName() string { return "live_sessions" }
+
 type Repository struct {
 	db *gorm.DB
 }
@@ -34,7 +45,13 @@ type Repository struct {
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
 func (r *Repository) Create(ctx context.Context, room *Room) error {
-	return r.db.WithContext(ctx).Create(room).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(room).Error; err != nil {
+			return err
+		}
+		startedAt := room.CreatedAt
+		return tx.Create(&Session{RoomID: room.ID, StartedAt: &startedAt}).Error
+	})
 }
 
 func (r *Repository) FindByID(ctx context.Context, id uint64) (Room, error) {
@@ -81,6 +98,20 @@ func (r *Repository) SetStatus(ctx context.Context, id, ownerID uint64, status s
 			now := time.Now().UTC().Truncate(time.Millisecond)
 			closedAt = &now
 		}
+		if status == Closed {
+			result := tx.Model(&Session{}).Where("room_id = ? AND ended_at IS NULL", id).Update("ended_at", closedAt)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return errors.New("房间活动场次状态不一致")
+			}
+		} else {
+			startedAt := time.Now().UTC().Truncate(time.Millisecond)
+			if err := tx.Create(&Session{RoomID: id, StartedAt: &startedAt}).Error; err != nil {
+				return err
+			}
+		}
 		values := map[string]any{"status": status, "closed_at": closedAt}
 		if err := tx.Model(&Room{}).Where("id = ?", id).Updates(values).Error; err != nil {
 			return err
@@ -91,4 +122,14 @@ func (r *Repository) SetStatus(ctx context.Context, id, ownerID uint64, status s
 		return nil
 	})
 	return room, err
+}
+
+// ActiveSession 查询当前房间的活动场次；调用方仍需校验房间状态。
+func (r *Repository) ActiveSession(ctx context.Context, roomID uint64) (Session, error) {
+	var session Session
+	err := r.db.WithContext(ctx).Where("room_id = ? AND ended_at IS NULL", roomID).Take(&session).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Session{}, ErrNotFound
+	}
+	return session, err
 }

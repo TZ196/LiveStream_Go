@@ -84,6 +84,10 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	roomRepository := room.NewRepository(db)
 	roomService := room.NewService(roomRepository)
 	apiServer := httpserver.New(cfg, logger, db, userService, roomService, tokens)
+	stopLikes, err := startLikes(runCtx, db, roomService, apiServer, logger)
+	if err != nil {
+		return errors.Join(err, database.Close(db))
+	}
 
 	// Hertz 会调用这个函数等待运行错误或停止信号。
 	// Spin 不直接返回错误，因此需要保存监听失败的原因。
@@ -110,6 +114,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		"shutdown_timeout", cfg.ShutdownTimeout.String(),
 	)
 	apiServer.Hertz.Spin()
+	stopLikes()
 
 	// HTTP 关闭流程返回后再关闭连接池；关闭错误也交给入口处理。
 	closeErr := database.Close(db)
