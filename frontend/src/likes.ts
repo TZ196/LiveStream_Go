@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { useLeaderboard } from './leaderboard'
 import { getLikeTicket, newRequestId } from './api/likes'
 import { isRecord } from './api/http'
+import { deliveryTiming } from './deliveryTiming'
 
 const batchWindowMs = 500
 const ackTimeoutMs = 3000
@@ -39,6 +40,7 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
   const notice = ref('')
   const roomStorageKey = `livestream.likes.${userId}.${roomId}`
   let socket: WebSocket | undefined
+  let timing: ReturnType<typeof deliveryTiming> | undefined
   let controller: AbortController | undefined
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined
   let sendTimer: ReturnType<typeof setTimeout> | undefined
@@ -142,9 +144,11 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
   }
 
   function receive(event: MessageEvent<string>) {
+    const receivedAt = performance.now()
     let message: unknown
     try { message = JSON.parse(event.data) } catch { return }
     if (!isRecord(message) || !isRecord(message.data)) return
+    timing?.receive(message, receivedAt)
     if (message.type === 'LIKES_UNAVAILABLE') {
       likeCount.value = null
       notice.value = '实时点赞暂不可用，正在恢复。'
@@ -195,6 +199,7 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(url)
       socket = ws
+      timing = deliveryTiming(ws, sessionId)
       ws.onopen = () => {
         if (socket !== ws) return
         connected.value = true
@@ -213,6 +218,8 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
         if (socket !== ws) return
         connected.value = false
         socket = undefined
+        timing?.stop()
+        timing = undefined
         board.stop()
         cancelSendTimer()
         scheduleReconnect()
@@ -254,6 +261,8 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
     cancelSendTimer()
     const ws = socket
     socket = undefined
+    timing?.stop()
+    timing = undefined
     ws?.close()
   }
 

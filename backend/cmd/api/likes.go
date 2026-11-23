@@ -82,6 +82,8 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 					return err
 				}
 				result, err := projection.ApplyLike(ctx, record)
+				// 此刻固定 Redis 结果与结束时间，将指标登记留到内存同步之后。
+				defer manager.ObserveProjection(record, result.Duplicate, err, time.Now())
 				if err != nil {
 					return err
 				}

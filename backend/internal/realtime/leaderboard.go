@@ -2,7 +2,6 @@ package realtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -42,6 +41,8 @@ type publicBoard struct {
 	rows     []BoardRow
 }
 
+var errBoardBusy = errors.New("本场榜单缓存正在读取")
+
 type personalUpdate struct {
 	revision int64
 	count    string
@@ -56,7 +57,7 @@ func (manager *Manager) readBoard(ctx context.Context, view *audience, roomID, s
 	if userID == "" {
 		// 广播读取可以留到下个周期，不在其他请求持有的缓存锁后排队。
 		if !cache.mu.TryLock() {
-			return BoardResponse{}, errors.New("本场榜单缓存正在读取")
+			return BoardResponse{}, errBoardBusy
 		}
 	} else {
 		cache.mu.Lock()
@@ -145,14 +146,6 @@ func (manager *Manager) Leaderboard(ctx context.Context, roomID, sessionID, user
 	return answer, nil
 }
 
-func boardFrame(kind string, data any) ([]byte, error) {
-	return json.Marshal(struct {
-		Version int    `json:"version"`
-		Type    string `json:"type"`
-		Data    any    `json:"data"`
-	}{1, kind, data})
-}
-
 // delta 仅发变化的名次；超过单帧预算时客户端按版本获取一次 HTTP 快照。
 func boardDelta(old []BoardRow, base string, board BoardResponse) ([]byte, error) {
 	changes := make([]BoardRow, 0)
@@ -165,11 +158,11 @@ func boardDelta(old []BoardRow, base string, board BoardResponse) ([]byte, error
 		"room_id": board.RoomID, "session_id": board.SessionID, "projection_epoch": board.Epoch,
 		"revision": board.Revision, "base_revision": base, "size": len(board.Top), "changes": changes,
 	}
-	frame, err := boardFrame("LIKE_BOARD_DELTA", data)
+	frame, err := encodeFrame("LIKE_BOARD_DELTA", data)
 	if err != nil || len(frame) <= 8*1024 {
 		return frame, err
 	}
-	return boardFrame("LIKE_BOARD_REFRESH", map[string]string{"room_id": board.RoomID, "session_id": board.SessionID, "projection_epoch": board.Epoch, "revision": board.Revision})
+	return encodeFrame("LIKE_BOARD_REFRESH", map[string]string{"room_id": board.RoomID, "session_id": board.SessionID, "projection_epoch": board.Epoch, "revision": board.Revision})
 }
 
 func (manager *Manager) RunLeaderboard(ctx context.Context) {
@@ -203,6 +196,7 @@ func (manager *Manager) flushLeaderboard(ctx context.Context) {
 func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint64, view *audience) {
 	// 忙场次的待发标记仍留在房间，下一轮再取，定时器可继续处理其他场次。
 	if !view.mu.TryLock() {
+		manager.metrics.skips.WithLabelValues("board_room_busy").Inc()
 		return
 	}
 	if view.closed.Load() || !manager.available.Load() {
@@ -221,7 +215,7 @@ func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint
 
 	sessionText := strconv.FormatUint(sessionID, 10)
 	for _, update := range personal {
-		frame, err := boardFrame("MY_LIKES_UPDATE", map[string]string{
+		frame, err := encodeFrame("MY_LIKES_UPDATE", map[string]string{
 			"session_id": sessionText, "projection_epoch": manager.epoch,
 			"likes_revision": strconv.FormatInt(update.revision, 10), "count": update.count,
 		})
@@ -229,7 +223,7 @@ func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint
 			slog.Error("encode_personal_likes", "error", err)
 			continue
 		}
-		manager.deliver(view, update.clients, frame)
+		manager.sendRoomFrame(view, update.clients, &outbound{payload: frame}, true)
 	}
 	if !needsBoard {
 		return
@@ -239,6 +233,11 @@ func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint
 	cancel()
 	if err != nil {
 		// 只在分发成功生成差量后推进版本，读失败可在下一轮重试。
+		reason := "board_read_error"
+		if errors.Is(err, errBoardBusy) {
+			reason = "board_cache_busy"
+		}
+		manager.metrics.skips.WithLabelValues(reason).Inc()
 		return
 	}
 	version, err := strconv.ParseInt(board.Revision, 10, 64)
@@ -251,6 +250,7 @@ func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint
 		return
 	}
 	if !view.mu.TryLock() {
+		manager.metrics.skips.WithLabelValues("board_room_busy").Inc()
 		return
 	}
 	if view.closed.Load() || !manager.available.Load() || view.sentBoard != base {
@@ -259,6 +259,9 @@ func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint
 	}
 	clients := copyClients(view.clients)
 	view.lastTop, view.sentBoard = board.Top, version
+	if version >= view.wantedBoard {
+		view.boardSince.Store(nil)
+	}
 	view.mu.Unlock()
-	manager.deliver(view, clients, frame)
+	manager.sendRoomFrame(view, clients, &outbound{payload: frame}, true)
 }

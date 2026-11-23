@@ -122,7 +122,7 @@ func (manager *Manager) unregister(sessionID uint64, view *audience, userID stri
 	if empty {
 		manager.remove(sessionID, view)
 	}
-	client.close()
+	client.close("peer_closed")
 }
 
 // 摘除期间不嵌套目录锁与房间锁。物理断开由调用方在释放准入锁后执行。
@@ -143,8 +143,8 @@ func (manager *Manager) detachRooms(roomID uint64) []*connection {
 	return clients
 }
 
-func closeClients(clients []*connection) {
+func closeClients(clients []*connection, reason string) {
 	for _, client := range clients {
-		client.close()
+		client.close(reason)
 	}
 }

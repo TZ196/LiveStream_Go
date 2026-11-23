@@ -32,15 +32,9 @@ type Manager struct {
 	admission   sync.RWMutex
 	mu          sync.RWMutex
 	audiences   map[uint64]*audience
+	metrics     *deliveryMetrics
+	connections atomic.Uint64
 	stopping    bool // 受 admission 保护
-}
-
-type connection struct {
-	socket   *websocket.Conn
-	send     chan []byte
-	done     chan struct{}
-	once     sync.Once
-	delivery sync.Mutex // 排序本连接的业务帧与暂停通知，只覆盖非阻塞入队
 }
 
 type frame struct {
@@ -53,62 +47,9 @@ type frame struct {
 
 // NewManager 组装房间查询、一次性票据和 Kafka Producer。
 func NewManager(rooms *room.Service, producer *messaging.Producer, projection *messaging.ProjectionRepository, initializer *messaging.ProjectionInitializer, users *user.Repository, epoch string) *Manager {
-	return &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, initializer: initializer, users: users, epoch: epoch, audiences: make(map[uint64]*audience)}
-}
-
-// close 关闭连接，允许多个路径同时调用。
-func (client *connection) close() {
-	client.once.Do(func() {
-		client.delivery.Lock()
-		close(client.done)
-		client.delivery.Unlock()
-		_ = client.socket.Close()
-	})
-}
-
-// enqueue 将消息放入有限队列；慢连接会被断开，避免拖慢消费。
-func (client *connection) enqueue(payload []byte) {
-	client.delivery.Lock()
-	ok := client.offer(payload)
-	client.delivery.Unlock()
-	if !ok {
-		client.close()
-	}
-}
-
-// offer 只尝试入队，满队列交由调用者在释放锁后关闭。
-func (client *connection) offer(payload []byte) bool {
-	select {
-	case <-client.done:
-		return true
-	default:
-	}
-	select {
-	case client.send <- payload:
-		return true
-	default:
-		return false
-	}
-}
-
-// 普通帧与暂停通知经过同一条连接的投递门。暂停通知之后不会排入旧数据，
-// 恢复时关闭旧 audience 的所有连接，新连接从 Redis 获取首屏。
-func (manager *Manager) deliver(view *audience, clients []*connection, frame []byte) {
-	manager.sendRoomFrame(view, clients, frame, true)
-}
-
-func (manager *Manager) sendRoomFrame(view *audience, clients []*connection, frame []byte, available bool) {
-	for _, client := range clients {
-		client.delivery.Lock()
-		full := false
-		if !view.closed.Load() && manager.available.Load() == available {
-			full = !client.offer(frame)
-		}
-		client.delivery.Unlock()
-		if full {
-			client.close()
-		}
-	}
+	manager := &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, initializer: initializer, users: users, epoch: epoch, audiences: make(map[uint64]*audience)}
+	manager.metrics = newDeliveryMetrics(manager)
+	return manager
 }
 
 // ServeHTTP 消费一次性票据，完成 WebSocket 握手并读取用户消息。
@@ -135,17 +76,17 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	if err != nil {
 		return
 	}
-	client := &connection{socket: socket, send: make(chan []byte, 128), done: make(chan struct{})}
+	client := manager.newConnection(socket)
 	manager.admission.RLock()
 	active, checkErr := manager.rooms.ActiveSession(context.Background(), roomID)
 	if checkErr != nil || active.ID != session.ID {
 		manager.admission.RUnlock()
-		client.close()
+		client.close("admission")
 		return
 	}
 	if manager.stopping {
 		manager.admission.RUnlock()
-		client.close()
+		client.close("admission")
 		return
 	}
 	userID := strconv.FormatUint(proof.identity.UserID, 10)
@@ -172,12 +113,12 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		count = snapshot.Count
 		revision = snapshot.Revision
 	}
-	initial, _ := json.Marshal(map[string]any{"version": 1, "type": "ROOM_STATE", "data": map[string]any{"room_id": roomText, "session_id": strconv.FormatUint(session.ID, 10), "like_count": count, "likes_available": snapshotErr == nil, "projection_epoch": manager.epoch, "likes_revision": revision}})
+	initial, _ := json.Marshal(map[string]any{"version": 1, "type": "ROOM_STATE", "data": map[string]any{"room_id": roomText, "session_id": strconv.FormatUint(session.ID, 10), "like_count": count, "likes_available": snapshotErr == nil, "projection_epoch": manager.epoch, "likes_revision": revision, "delivery_probe": client.probe != nil}})
 	// 注册到读取 Redis 之间的更新已进入有界队列，先写首屏，再由写协程按序排空。
 	go client.writeLoop(proof.identity.ExpiresAt, initial)
 	if snapshotErr != nil {
 		// 暂停后才加入的连接可能错过了该场已发送的暂停通知。
-		manager.sendRoomFrame(view, []*connection{client}, unavailableFrame, false)
+		manager.sendRoomFrame(view, []*connection{client}, &outbound{payload: unavailableFrame}, false)
 	}
 	socket.SetReadLimit(8 * 1024)
 	deadline := func() time.Time {
@@ -189,10 +130,18 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}
 	_ = socket.SetReadDeadline(deadline())
 	socket.SetPongHandler(func(string) error { return socket.SetReadDeadline(deadline()) })
+	sessionText := strconv.FormatUint(session.ID, 10)
+	var lastPing time.Time
 	for {
 		kind, payload, err := socket.ReadMessage()
 		if err != nil {
 			return
+		}
+		// 写协程可能还在完成最后一次 socket 写。逻辑关闭后不再准入新收到的业务帧。
+		select {
+		case <-client.done:
+			return
+		default:
 		}
 		if kind != websocket.TextMessage {
 			return
@@ -204,7 +153,15 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		var extra any
-		if decoder.Decode(&extra) != io.EOF || input.Version != 1 || input.Type != "LIKE" || input.SessionID != strconv.FormatUint(session.ID, 10) {
+		if decoder.Decode(&extra) != io.EOF || input.Version != 1 || input.SessionID != sessionText {
+			return
+		}
+		switch input.Type {
+		case "PING", "DELIVERY_RECEIPT":
+			client.handleDeliveryControl(input, &lastPing)
+			continue
+		case "LIKE":
+		default:
 			return
 		}
 		count, err := readLikeCount(input.Data)
@@ -244,44 +201,13 @@ func readLikeCount(data json.RawMessage) (int64, error) {
 	return payload.Count, nil
 }
 
-// writeLoop 独占连接写入，周期性 ping 并在身份到期时关闭。
-func (client *connection) writeLoop(expires time.Time, initial []byte) {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-	defer client.close()
-	_ = client.socket.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := client.socket.WriteMessage(websocket.TextMessage, initial); err != nil {
-		return
-	}
-	timer := time.NewTimer(time.Until(expires))
-	defer timer.Stop()
-	for {
-		select {
-		case payload := <-client.send:
-			_ = client.socket.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if client.socket.WriteMessage(websocket.TextMessage, payload) != nil {
-				return
-			}
-		case <-ticker.C:
-			_ = client.socket.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if client.socket.WriteMessage(websocket.PingMessage, nil) != nil {
-				return
-			}
-		case <-timer.C:
-			return
-		case <-client.done:
-			return
-		}
-	}
-}
-
 // DetachRoom 在关房准入区内摘除旧场次，返回的清理函数可在释放准入锁后调用。
 func (manager *Manager) DetachRoom(roomID uint64) func() {
 	if roomID == 0 {
 		return func() {}
 	}
 	clients := manager.detachRooms(roomID)
-	return func() { closeClients(clients) }
+	return func() { closeClients(clients, "room_closed") }
 }
 
 // CloseRoom 供直接关闭连接的调用方使用，也可在已有准入保护下调用。
@@ -296,7 +222,7 @@ func (manager *Manager) Close() {
 	manager.available.Store(false)
 	clients := manager.detachRooms(0)
 	manager.admission.Unlock()
-	closeClients(clients)
+	closeClients(clients, "shutdown")
 }
 
 // Resume 先隔离旧代次，再允许新连接使用 Redis 权威首屏。
@@ -309,7 +235,7 @@ func (manager *Manager) Resume() {
 	clients := manager.detachRooms(0)
 	manager.available.Store(true)
 	manager.admission.Unlock()
-	closeClients(clients)
+	closeClients(clients, "recovery")
 }
 
 // LockAdmission 在房间关闭或重开时阻止新的连接和点赞准入。
@@ -332,9 +258,10 @@ func (manager *Manager) BroadcastUnavailable() {
 		}
 		view.pauseNotified = true
 		view.pending = nil
+		view.pendingSince.Store(nil)
 		clients := copyClients(view.clients)
 		view.mu.Unlock()
-		manager.sendRoomFrame(view, clients, unavailableFrame, false)
+		manager.sendRoomFrame(view, clients, &outbound{payload: unavailableFrame}, false)
 	}
 }
 

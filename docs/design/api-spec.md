@@ -8,7 +8,9 @@
 
 业务接口成功响应为 {"data": ... , "trace_id": "..."}。错误响应为 {"error": {"code": "...", "message": "...", "retryable": false}, "trace_id": "..."}。trace_id 是诊断标识，不是业务幂等键。输入不接受未定义字段。运维探针使用下文定义的独立响应。
 
-除注册、登录、健康和就绪接口外，请求携带 Authorization: Bearer 访问令牌。Content-Type 不匹配返回 415，格式错误返回 400，权限不足不能通过客户端传递用户 ID 绕过。
+除注册、登录、健康、就绪和运行指标接口外，请求携带 Authorization: Bearer 访问令牌。Content-Type 不匹配返回 415，格式错误返回 400，权限不足不能通过客户端传递用户 ID 绕过。
+
+启用实时点赞后，API 的 `GET /metrics` 提供 Prometheus 抓取接口。时间序列按实例和固定结果聚合，房间、场次、用户与连接 ID 不作为标签。生产反向代理仅向监控网开放此路径。指标口径见[验证设计](../verification/plan.md#实时点赞运行指标)。
 
 ## 认证和凭据
 
