@@ -3,6 +3,7 @@ package messaging
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,7 +18,8 @@ func TestProjectionIntegration(t *testing.T) {
 	if address == "" {
 		t.Skip("未指定隔离 Redis")
 	}
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
 	client := redis.NewClient(&redis.Options{Addr: address})
 	defer client.Close()
 	epoch := uuid.NewString()
@@ -44,17 +46,52 @@ func TestProjectionIntegration(t *testing.T) {
 	if err := repo.InitializeNewSession(ctx, "2", "3"); err != nil {
 		t.Fatal(err)
 	}
-	first, err := repo.ApplyLike(ctx, record)
-	if err != nil {
-		t.Fatal(err)
+	// 让 16 个调用者同时投影同一条消息，只有一个可以首次更新计数和去重指纹。
+	var attempts [16]struct {
+		result ProjectedLike
+		err    error
 	}
+	start := make(chan struct{})
+	var ready, workers sync.WaitGroup
+	ready.Add(len(attempts))
+	for i := range attempts {
+		workers.Go(func() {
+			ready.Done()
+			<-start
+			attempts[i].result, attempts[i].err = repo.ApplyLike(ctx, record)
+		})
+	}
+	ready.Wait()
+	close(start)
+	workers.Wait()
+	applied := 0
+	for _, attempt := range attempts {
+		if attempt.err != nil || attempt.result.Count != "100000" || attempt.result.Revision != "100000" || attempt.result.Personal != "100000" {
+			t.Fatal(attempt.result, attempt.err)
+		}
+		if !attempt.result.Duplicate {
+			applied++
+		}
+	}
+	if applied != 1 {
+		t.Fatalf("%d 次并发投影中有 %d 次首次计数", len(attempts), applied)
+	}
+	fingerprint, err := client.Get(ctx, "ls:v1:projection:"+epoch+":processed:"+event.EventID).Result()
+	if err != nil || fingerprint != event.UserID+":"+event.RequestHash {
+		t.Fatal("首次计数后未找到对应指纹", err)
+	}
+	board, err := repo.ReadBoard(ctx, event.RoomID, event.SessionID, event.UserID, "")
+	if err != nil || board.Personal != "100000" || len(board.Top) != 1 || board.Top[0] != (RankedUser{UserID: event.UserID, Count: "100000"}) {
+		t.Fatal(board, err)
+	}
+	t.Logf("同一 event_id 并发投影 %d 次，首次计数 %d 次，重复 %d 次，个人和榜首均为 %s", len(attempts), applied, len(attempts)-applied, board.Personal)
 	record.Offset = 1
 	second, err := repo.ApplyLike(ctx, record)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Count != "100000" || first.Revision != "100000" || first.Duplicate || second.Count != "100000" || !second.Duplicate {
-		t.Fatalf("重复处理结果不正确: %+v %+v", first, second)
+	if second.Count != "100000" || !second.Duplicate {
+		t.Fatalf("更高位移的重复处理结果不正确：%+v", second)
 	}
 	record.Offset = 0
 	if _, err := repo.ApplyLike(ctx, record); err != nil {

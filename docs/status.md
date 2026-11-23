@@ -1,6 +1,6 @@
 # LiveStream 当前状态
 
-更新于 2026 年 11 月 22 日。当前点赞链路支持批量发送、同场总数、前 100 名与榜外个人数，以及两个独立消费组，数据库结构版本为 5。[本地运行说明](deployment.md)
+更新于 2026 年 11 月 23 日。当前点赞链路支持批量发送、同场总数、前 100 名与榜外个人数，以及两个独立消费组，数据库结构版本为 5。[本地运行说明](deployment.md)
 
 ## 已完成与未完成
 
@@ -18,6 +18,8 @@
 批量点赞的时序、ACK 丢失、场次隔离、消费组分配、Worker 追平和数据库升级在 WSL2 隔离环境验证。[批量点赞验证](verification/reports/batched-likes.md)
 
 本场点赞榜已在有历史点击的存量场次中验证补建、第 100 名进出、榜外私有更新、断档回补和重新开播。[本场点赞榜验证](verification/reports/like-leaderboard.md)
+
+Redis 已计数后，房间锁竞争可使实时处理越过单条消息期限。隔离实验验证了接手者重放时计数准确，也复现了取消等待后观众缺少一次总数更新的情形。[锁等待与分区交接验证](verification/reports/like-lock-rebalance.md)
 
 此前的环境及功能验证见 [P1a](verification/reports/p1a.md)、[P1b](verification/reports/p1b.md)、[P2](verification/reports/p2.md) 和[初版点赞链路](verification/reports/likes-chain.md)。
 

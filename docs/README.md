@@ -35,6 +35,7 @@
 - [P2：房间管理及主干合并复查](verification/reports/p2.md)
 - [初版点赞链路](verification/reports/likes-chain.md)和[批量点赞、快照与消费组验收](verification/reports/batched-likes.md)
 - [本场点赞榜与存量补建验收](verification/reports/like-leaderboard.md)
+- [实时点赞的锁等待、分区交接与重复投影](verification/reports/like-lock-rebalance.md)
 
 ## 维护约定
 
