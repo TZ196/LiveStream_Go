@@ -85,8 +85,7 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 				if err != nil {
 					return err
 				}
-				manager.QueueLikeUpdate(event, result)
-				return nil
+				return manager.QueueLikeUpdate(ctx, event, result)
 			})
 			current.Close()
 			if ctx.Err() != nil {
