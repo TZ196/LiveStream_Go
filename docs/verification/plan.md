@@ -123,6 +123,20 @@ PERF-02 在使用压测工具得出性能结论前，先用已知规模的单房
 
 每份实验记录包含：需求/案例编号与假设、代码提交或 PR、机器资源与软件版本、配置和数据规模、复现命令及故障点、预热/稳态时长与样本量、原始日志或数据位置、测量方法、结果和限制。优化前后采用相同业务保证、环境和负载，说明改动项与观测开销，重复运行并保留每次结果；条件不一致时不直接声称性能提升比例。
 
+### 实时点赞运行指标
+
+| 指标（统一前缀 `livestream_`） | 样本与边界 |
+| --- | --- |
+| `like_produce_to_redis_seconds` | Kafka 记录的服务端 CreateTime 到 Redis Lua 返回，区分首次和重复。生产主机与消费主机需要校时。投影错误、缺失或无效时间另计 `like_projection_exclusions_total`。 |
+| `like_redis_to_snapshot_seconds` | Redis 成功返回到内存确实更新，包含等场次锁。`like_snapshot_updates_total` 分列无观众、已关闭、取消和版本未变化。 |
+| `like_snapshot_to_enqueue_seconds` | 每个合并批次从第一笔待发到本次最后一次成功入队。`like_fanouts_total` 区分全部成功、部分成功和零成功。逐事件覆盖延迟须另用已知收件集合的压测统计。 |
+| `oldest_pending_seconds{kind="likes"或"board"}` | 抓取当下所有活跃场次的最大待发年龄。总数包含已取走、仍在入队的批次，榜单计到差量基准推进。覆盖新版本保留最早起点，空闲为零。持续超过两个推送周期时，抓取触发的限频日志给出场次和年龄。搭配 `like_flush_seconds` 和 `broadcast_skips_total` 区分房间忙、榜单缓存忙和读取失败。 |
+| `ws_queue_depth`、`ws_closes_total` | 前者为抽中连接尝试入队时的占用分布，受活跃连接权重影响。后者全量统计每条连接首次生效的关闭原因，队列满为 `queue_full`，写超时为 `write_timeout`。 |
+| `ws_enqueue_to_write_seconds` | 抽中连接的总数帧从入队到 WebSocket 写成功返回，使用服务端单调时钟。 |
+| `ws_browser_receive_seconds`、`ws_receipt_roundtrip_seconds` | 分别统计独立校时后的浏览器接收估计，以及服务器写出前到回执返回的实测往返。结合 `ws_clock_uncertainty_seconds`、`ws_delivery_probes_total` 的签发、有效、排除及未答数解释数据。采样与校时约定见 [WebSocket 协议](../design/websocket-protocol.md#点赞总数送达采样)。 |
+
+各阶段样本的统计单位不同，各阶段 P99 不可相加。200 ms 是总数合并周期，公共榜单的合并周期为 1 秒。
+
 ## 实施检查规则
 
 P1a 起在实际 Module 中进行 gofmt、go vet、go test 和 API 构建；P1b 构建实际存在的 cmd/migrate，P4 Worker 存在后再增加该入口。并发变更运行相关 race 测试，数据链路变更运行对应故障和集成案例。前端运行实际定义的类型检查、构建和相关测试，Compose 文件存在后进行配置校验和运行验证。

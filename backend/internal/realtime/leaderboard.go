@@ -2,7 +2,6 @@ package realtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"strconv"
@@ -34,12 +33,15 @@ type BoardResponse struct {
 	Me            BoardMe    `json:"me"`
 }
 
-// 只随在线场次缓存最多 100 个公开条目。每次替换整个切片，发出的快照不可变。
+// 单独串行化同场榜单的 Redis 读取与昵称补全。持此锁期间不再获取目录锁或房间锁。
+// 每次替换整个前 100 名切片，调用方拿到的快照可在锁外读取。
 type publicBoard struct {
 	mu       sync.Mutex
 	revision string
 	rows     []BoardRow
 }
+
+var errBoardBusy = errors.New("本场榜单缓存正在读取")
 
 type personalUpdate struct {
 	revision int64
@@ -52,7 +54,14 @@ func (manager *Manager) readBoard(ctx context.Context, view *audience, roomID, s
 	if view != nil {
 		cache = &view.board
 	}
-	cache.mu.Lock()
+	if userID == "" {
+		// 广播读取可以留到下个周期，不在其他请求持有的缓存锁后排队。
+		if !cache.mu.TryLock() {
+			return BoardResponse{}, errBoardBusy
+		}
+	} else {
+		cache.mu.Lock()
+	}
 	defer cache.mu.Unlock()
 	snap, err := manager.projection.ReadBoard(ctx, roomID, sessionID, userID, cache.revision)
 	if err != nil {
@@ -75,18 +84,6 @@ func (manager *Manager) readBoard(ctx context.Context, view *audience, roomID, s
 			answer.Me.Rank = row.Rank
 			break
 		}
-	}
-	// 第一个首屏快照同时成为本场分发差量的起点。持有场次缓存锁保证首屏之间的顺序。
-	if view != nil && userID != "" {
-		version, err := strconv.ParseInt(snap.Revision, 10, 64)
-		if err != nil {
-			return BoardResponse{}, err
-		}
-		manager.mu.Lock()
-		if view.lastTop == nil && view.wantedBoard == 0 {
-			view.sentBoard, view.lastTop = version, answer.Top
-		}
-		manager.mu.Unlock()
 	}
 	return answer, nil
 }
@@ -131,18 +128,22 @@ func (manager *Manager) Leaderboard(ctx context.Context, roomID, sessionID, user
 	if err := manager.initializer.EnsureSession(ctx, roomID, sessionID); err != nil {
 		return BoardResponse{}, err
 	}
-	manager.mu.Lock()
-	view := manager.audiences[sessionID]
-	manager.mu.Unlock()
-	return manager.readBoard(ctx, view, strconv.FormatUint(roomID, 10), strconv.FormatUint(sessionID, 10), strconv.FormatUint(userID, 10))
-}
-
-func boardFrame(kind string, data any) ([]byte, error) {
-	return json.Marshal(struct {
-		Version int    `json:"version"`
-		Type    string `json:"type"`
-		Data    any    `json:"data"`
-	}{1, kind, data})
+	view := manager.lookup(sessionID)
+	answer, err := manager.readBoard(ctx, view, strconv.FormatUint(roomID, 10), strconv.FormatUint(sessionID, 10), strconv.FormatUint(userID, 10))
+	if err != nil || view == nil {
+		return answer, err
+	}
+	version, err := strconv.ParseInt(answer.Revision, 10, 64)
+	if err != nil {
+		return BoardResponse{}, err
+	}
+	// 首个 HTTP 快照可作为差量起点。readBoard 已释放缓存锁，房间锁只保护分发进度。
+	view.mu.Lock()
+	if !view.closed.Load() && view.lastTop == nil && view.wantedBoard == 0 {
+		view.sentBoard, view.lastTop = version, answer.Top
+	}
+	view.mu.Unlock()
+	return answer, nil
 }
 
 // delta 仅发变化的名次；超过单帧预算时客户端按版本获取一次 HTTP 快照。
@@ -157,11 +158,11 @@ func boardDelta(old []BoardRow, base string, board BoardResponse) ([]byte, error
 		"room_id": board.RoomID, "session_id": board.SessionID, "projection_epoch": board.Epoch,
 		"revision": board.Revision, "base_revision": base, "size": len(board.Top), "changes": changes,
 	}
-	frame, err := boardFrame("LIKE_BOARD_DELTA", data)
+	frame, err := encodeFrame("LIKE_BOARD_DELTA", data)
 	if err != nil || len(frame) <= 8*1024 {
 		return frame, err
 	}
-	return boardFrame("LIKE_BOARD_REFRESH", map[string]string{"room_id": board.RoomID, "session_id": board.SessionID, "projection_epoch": board.Epoch, "revision": board.Revision})
+	return encodeFrame("LIKE_BOARD_REFRESH", map[string]string{"room_id": board.RoomID, "session_id": board.SessionID, "projection_epoch": board.Epoch, "revision": board.Revision})
 }
 
 func (manager *Manager) RunLeaderboard(ctx context.Context) {
@@ -177,60 +178,90 @@ func (manager *Manager) RunLeaderboard(ctx context.Context) {
 	}
 }
 
+type personalSnapshot struct {
+	revision int64
+	count    string
+	clients  []*connection
+}
+
 func (manager *Manager) flushLeaderboard(ctx context.Context) {
-	manager.mu.Lock()
-	work := make(map[uint64]*audience)
-	for sessionID, view := range manager.audiences {
-		if !manager.available.Load() {
-			break
-		}
-		for id, updates := range view.dirtyPeople {
-			frame, err := boardFrame("MY_LIKES_UPDATE", map[string]string{
-				"session_id": strconv.FormatUint(sessionID, 10), "projection_epoch": manager.epoch,
-				"likes_revision": strconv.FormatInt(updates.revision, 10), "count": updates.count,
-			})
-			if err != nil {
-				slog.Error("encode_personal_likes", "error", err)
-				continue
-			}
-			for client := range updates.clients {
-				client.enqueue(frame)
-			}
-			delete(view.dirtyPeople, id)
-		}
-		if view.wantedBoard > view.sentBoard {
-			work[sessionID] = view
-		}
-	}
-	manager.mu.Unlock()
-	for sessionID, view := range work {
-		if ctx.Err() != nil {
+	for sessionID, view := range manager.roomList() {
+		if ctx.Err() != nil || !manager.available.Load() {
 			return
 		}
-		read, cancel := context.WithTimeout(ctx, time.Second)
-		board, err := manager.readBoard(read, view, strconv.FormatUint(view.roomID, 10), strconv.FormatUint(sessionID, 10), "")
-		cancel()
-		if err != nil {
-			// 未推送的版本保留至下一轮重新读取。
-			continue
-		}
-		version, err := strconv.ParseInt(board.Revision, 10, 64)
-		if err != nil {
-			continue
-		}
-		manager.mu.Lock()
-		if manager.audiences[sessionID] == view && manager.available.Load() && version > view.sentBoard {
-			frame, err := boardDelta(view.lastTop, strconv.FormatInt(view.sentBoard, 10), board)
-			if err != nil {
-				manager.mu.Unlock()
-				slog.Error("encode_board_delta", "error", err)
-				continue
-			}
-			for client := range view.clients {
-				client.enqueue(frame)
-			}
-			view.lastTop, view.sentBoard = board.Top, version
-		}
-		manager.mu.Unlock()
+		manager.flushRoomLeaderboard(ctx, sessionID, view)
 	}
+}
+
+func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint64, view *audience) {
+	// 忙场次的待发标记仍留在房间，下一轮再取，定时器可继续处理其他场次。
+	if !view.mu.TryLock() {
+		manager.metrics.skips.WithLabelValues("board_room_busy").Inc()
+		return
+	}
+	if view.closed.Load() || !manager.available.Load() {
+		view.mu.Unlock()
+		return
+	}
+	// 个人数、版本和收件人必须属于同一时刻。取走后，新点赞会重新标记该用户。
+	personal := make([]personalSnapshot, 0, len(view.dirtyPeople))
+	for id, update := range view.dirtyPeople {
+		personal = append(personal, personalSnapshot{update.revision, update.count, copyClients(update.clients)})
+		delete(view.dirtyPeople, id)
+	}
+	base, previous := view.sentBoard, view.lastTop
+	needsBoard := view.wantedBoard > base
+	view.mu.Unlock()
+
+	sessionText := strconv.FormatUint(sessionID, 10)
+	for _, update := range personal {
+		frame, err := encodeFrame("MY_LIKES_UPDATE", map[string]string{
+			"session_id": sessionText, "projection_epoch": manager.epoch,
+			"likes_revision": strconv.FormatInt(update.revision, 10), "count": update.count,
+		})
+		if err != nil {
+			slog.Error("encode_personal_likes", "error", err)
+			continue
+		}
+		manager.sendRoomFrame(view, update.clients, &outbound{payload: frame}, true)
+	}
+	if !needsBoard {
+		return
+	}
+	read, cancel := context.WithTimeout(ctx, time.Second)
+	board, err := manager.readBoard(read, view, strconv.FormatUint(view.roomID, 10), sessionText, "")
+	cancel()
+	if err != nil {
+		// 只在分发成功生成差量后推进版本，读失败可在下一轮重试。
+		reason := "board_read_error"
+		if errors.Is(err, errBoardBusy) {
+			reason = "board_cache_busy"
+		}
+		manager.metrics.skips.WithLabelValues(reason).Inc()
+		return
+	}
+	version, err := strconv.ParseInt(board.Revision, 10, 64)
+	if err != nil || version <= base {
+		return
+	}
+	frame, err := boardDelta(previous, strconv.FormatInt(base, 10), board)
+	if err != nil {
+		slog.Error("encode_board_delta", "error", err)
+		return
+	}
+	if !view.mu.TryLock() {
+		manager.metrics.skips.WithLabelValues("board_room_busy").Inc()
+		return
+	}
+	if view.closed.Load() || !manager.available.Load() || view.sentBoard != base {
+		view.mu.Unlock()
+		return
+	}
+	clients := copyClients(view.clients)
+	view.lastTop, view.sentBoard = board.Top, version
+	if version >= view.wantedBoard {
+		view.boardSince.Store(nil)
+	}
+	view.mu.Unlock()
+	manager.sendRoomFrame(view, clients, &outbound{payload: frame}, true)
 }

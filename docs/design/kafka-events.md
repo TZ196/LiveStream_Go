@@ -36,6 +36,8 @@
 | timestamp | 从客户端生成的 UUIDv7 request_id 解析出的 Unix 毫秒；重试不变，服务端校验允许时间窗口；不等于服务器接收时间 |
 | payload | 弹幕为 content、username。点赞 v1 为 `{}`，计 1。点赞 v2 为 `{"count":5}` 形式，数量为正的 int64 |
 
+点赞 Producer 在每次发布时设置 Kafka 记录元数据的 CreateTime。实时消费组用它统计该次发布到 Redis 返回的时间。重复记录单列，业务 JSON、分区键和去重指纹沿用原定义。
+
 ```json
 {
   "schema_version": 1,

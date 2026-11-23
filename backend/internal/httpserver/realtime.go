@@ -19,6 +19,7 @@ import (
 func (s *Server) EnableRealtime(manager *realtime.Manager, origin string) {
 	s.realtime = manager
 	s.wsOrigin = origin
+	s.Hertz.GET("/metrics", adaptor.HertzHandler(manager.MetricsHandler()))
 	s.Hertz.POST("/api/v1/rooms/:id/ws-ticket", s.businessRequest, s.authenticate, s.issueWSTicket)
 	s.Hertz.GET("/api/v1/rooms/:id/sessions/:session/like-leaderboard", s.businessRequest, s.authenticate, s.likeLeaderboard)
 	s.Hertz.GET("/ws/rooms/:id", adaptor.HertzHandler(http.HandlerFunc(manager.ServeHTTP)))

@@ -190,15 +190,21 @@ func (s *Server) closeRoom(ctx context.Context, c *app.RequestContext) {
 	}
 	if s.realtime != nil {
 		s.realtime.LockAdmission()
-		defer s.realtime.UnlockAdmission()
 	}
 	value, err := s.rooms.Close(ctx, id, identity.UserID)
+	if s.realtime != nil {
+		var disconnect func()
+		if err == nil {
+			disconnect = s.realtime.DetachRoom(id)
+		}
+		s.realtime.UnlockAdmission()
+		if disconnect != nil {
+			disconnect()
+		}
+	}
 	if err != nil {
 		s.roomError(ctx, c, err)
 		return
-	}
-	if s.realtime != nil {
-		s.realtime.CloseRoom(id)
 	}
 	writeData(c, 200, publicRoom(value))
 }

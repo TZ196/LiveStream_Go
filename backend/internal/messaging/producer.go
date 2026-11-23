@@ -36,7 +36,7 @@ func (producer *Producer) PublishLike(ctx context.Context, event LikeEvent) erro
 	if err != nil {
 		return err
 	}
-	result := producer.client.ProduceSync(ctx, &kgo.Record{Topic: "live.events", Key: key, Value: value})
+	result := producer.client.ProduceSync(ctx, &kgo.Record{Topic: "live.events", Key: key, Value: value, Timestamp: time.Now()})
 	if err := result.FirstErr(); err != nil {
 		return fmt.Errorf("发送点赞事件结果未确认: %w", err)
 	}
