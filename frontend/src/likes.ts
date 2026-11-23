@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { useLeaderboard } from './leaderboard'
 import { getLikeTicket, newRequestId } from './api/likes'
 import { isRecord } from './api/http'
 
@@ -30,6 +31,7 @@ function restoreBatch(value: unknown): Batch | undefined {
 
 // 一次房间页面只连接一个场次。已发批次冻结，重试和后续点击各自独立。
 export function useRoomLikes(token: string, userId: string, roomId: string) {
+  const board = useLeaderboard(token, roomId, userId)
   const connected = ref(false)
   const likeCount = ref<string | null>(null)
   const pendingCount = ref(0)
@@ -143,7 +145,16 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
     let message: unknown
     try { message = JSON.parse(event.data) } catch { return }
     if (!isRecord(message) || !isRecord(message.data)) return
-    if (message.type === 'LIKES_UNAVAILABLE') { likeCount.value = null; notice.value = '实时点赞暂不可用，正在恢复。' }
+    if (message.type === 'LIKES_UNAVAILABLE') {
+      likeCount.value = null
+      notice.value = '实时点赞暂不可用，正在恢复。'
+      board.stop('本场点赞榜暂不可用')
+    }
+    if (message.type === 'ROOM_STATE' && message.data.session_id === sessionId && typeof message.data.projection_epoch === 'string') {
+      board.start(sessionId, message.data.projection_epoch)
+    } else {
+      board.receive(message.type, message.data)
+    }
     if (message.type === 'ACK' && typeof message.request_id === 'string') {
       pending = pending.filter(batch => batch.requestId !== message.request_id)
       save()
@@ -202,6 +213,7 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
         if (socket !== ws) return
         connected.value = false
         socket = undefined
+        board.stop()
         cancelSendTimer()
         scheduleReconnect()
       }
@@ -234,6 +246,7 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
 
   function stop() {
     stopped = true
+    board.stop()
     connected.value = false
     controller?.abort()
     clearTimeout(reconnectTimer)
@@ -244,5 +257,5 @@ export function useRoomLikes(token: string, userId: string, roomId: string) {
     ws?.close()
   }
 
-  return { connected, likeCount, pendingCount, full, notice, like, start, stop }
+  return { connected, likeCount, pendingCount, full, notice, like, start, stop, board }
 }

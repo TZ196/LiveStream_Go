@@ -12,6 +12,10 @@ import (
 
 // ValidateProjectionStartup 核对 Topic、Redis 实例代次和已提交位移，发现回退时停止消费。
 func (initializer *ProjectionInitializer) ValidateProjectionStartup(ctx context.Context, topicID string, committed map[int32]int64) error {
+	return initializer.validateProjectionStartup(ctx, topicID, committed, false)
+}
+
+func (initializer *ProjectionInitializer) validateProjectionStartup(ctx context.Context, topicID string, committed map[int32]int64, backfill bool) error {
 	prefix := "ls:v1:projection:" + initializer.projection.epoch + ":"
 	var existing int64
 	if err := initializer.db.WithContext(ctx).Table("projection_sessions").Where("epoch = ?", initializer.projection.epoch).Count(&existing).Error; err != nil {
@@ -81,6 +85,11 @@ func (initializer *ProjectionInitializer) ValidateProjectionStartup(ctx context.
 		if len(values) != 4 || values[0] != strconv.FormatUint(session.RoomID, 10) || values[1] == nil || values[2] == nil || values[3] != "1" {
 			return fmt.Errorf("场次 %d 的 Redis 投影缺失或无效", session.SessionID)
 		}
+		if !backfill {
+			if _, err := initializer.projection.ReadBoard(ctx, strconv.FormatUint(session.RoomID, 10), strconv.FormatUint(session.SessionID, 10), "", ""); err != nil {
+				return fmt.Errorf("场次 %d 的点赞榜未就绪，请核对后执行 backfill-like-board: %w", session.SessionID, err)
+			}
+		}
 	}
 	for partition, offset := range committed {
 		raw, err := initializer.projection.client.Get(ctx, prefix+"partition:"+strconv.FormatInt(int64(partition), 10)).Result()
@@ -100,6 +109,9 @@ func (initializer *ProjectionInitializer) ValidateProjectionStartup(ctx context.
 		if offset < 0 {
 			return fmt.Errorf("分区 %d 已有投影但 Kafka 位移丢失", partition)
 		}
+		if backfill && current > offset {
+			return fmt.Errorf("分区 %d 的 Redis 位移超出补建屏障", partition)
+		}
 		if current < offset {
 			return fmt.Errorf("分区 %d 的 Redis 位移落后于 Kafka", partition)
 		}
@@ -109,6 +121,10 @@ func (initializer *ProjectionInitializer) ValidateProjectionStartup(ctx context.
 
 // ValidatePersistenceStartup 核对数据库检查点与 Kafka 位移，防止以错误 Topic 继续消费。
 func (repository *PersistenceRepository) ValidatePersistenceStartup(ctx context.Context, topicID string, committed map[int32]int64) error {
+	return repository.validateCheckpoints(ctx, topicID, committed, false)
+}
+
+func (repository *PersistenceRepository) validateCheckpoints(ctx context.Context, topicID string, committed map[int32]int64, atLogEnd bool) error {
 	var rows []struct {
 		TopicID     string
 		PartitionID int32
@@ -134,6 +150,9 @@ func (repository *PersistenceRepository) ValidatePersistenceStartup(ctx context.
 		}
 		if offset < 0 {
 			return fmt.Errorf("分区 %d Kafka 位移丢失", partition)
+		}
+		if atLogEnd && checkpoint > offset {
+			return fmt.Errorf("分区 %d 数据库检查点超出补建屏障", partition)
 		}
 		if checkpoint < offset {
 			return fmt.Errorf("分区 %d 数据库检查点落后于 Kafka", partition)

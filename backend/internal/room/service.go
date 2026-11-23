@@ -10,10 +10,11 @@ import (
 )
 
 var (
-	ErrInvalidTitle = errors.New("房间标题去除首尾空白后须为 1–80 个字符")
-	ErrInvalidList  = errors.New("房间状态须为 OPEN 或 CLOSED，每页条数须为 1–100")
-	ErrForbidden    = errors.New("只有房主可以开播或结束直播")
-	ErrUnavailable  = errors.New("数据库暂不可用")
+	errNoActiveSession = errors.New("直播间当前没有开放场次")
+	ErrInvalidTitle    = errors.New("房间标题去除首尾空白后须为 1–80 个字符")
+	ErrInvalidList     = errors.New("房间状态须为 OPEN 或 CLOSED，每页条数须为 1–100")
+	ErrForbidden       = errors.New("只有房主可以开播或结束直播")
+	ErrUnavailable     = errors.New("数据库暂不可用")
 )
 
 type ListOptions struct {
@@ -118,7 +119,14 @@ func (s *Service) ActiveSession(ctx context.Context, roomID uint64) (Session, er
 		return Session{}, err
 	}
 	if value.Status != Open {
-		return Session{}, errors.New("直播间已关闭")
+		return Session{}, errNoActiveSession
 	}
-	return s.repository.ActiveSession(ctx, roomID)
+	session, err := s.repository.ActiveSession(ctx, roomID)
+	if errors.Is(err, ErrNotFound) {
+		return Session{}, errNoActiveSession
+	}
+	if err != nil {
+		return Session{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	return session, err
 }

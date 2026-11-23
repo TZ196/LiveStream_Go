@@ -63,7 +63,7 @@ npm run dev
 
 登录凭证保存于当前浏览器同源存储，刷新或重新打开页面可恢复，原有 30 分钟有效期不会延长；到期或主动退出后重新登录。同源标签页共享账号和退出状态，测试两个不同账号请使用独立浏览器或隐私窗口。首次更新旧版页面时，原内存凭证没有保存，需要登录一次。
 
-Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。WebSocket 点赞已接入；完整弹幕和在线人数协议仍未交付。
+Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。直播间已接入 WebSocket 点赞和本场点赞榜。完整弹幕和在线人数协议仍待交付。
 
 HTTP 客户端请求超时为 5 秒，离开页面取消未完成请求，写请求不自动重试。业务页面不显示开发连接检查，排查服务状态时直接访问 /healthz 和 /readyz；`npm run build` 生成的 dist 不包含开发代理，目前尚未接入 API 静态托管。
 
@@ -101,7 +101,7 @@ go test ./...
 go build ./cmd/api ./cmd/migrate
 ```
 
-修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check`、`npm run build`。并发或数据链路变更按 [验证计划](verification/plan.md) 增加相应检查。当前 Go 包无测试文件，`go test` 成功退出不代表执行了业务用例。
+修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check` 和 `npm run build`。Go 集成测试需要显式指定隔离的 Kafka、Redis、MySQL 环境，并发检查使用 `go test -race`。具体入口见[验证计划](verification/plan.md)。
 
 ## 后续部署阶段
 
@@ -122,7 +122,7 @@ Kafka 需要分别公布宿主和容器客户端地址，并配置独立 Control
 
 ## 本地点赞链路启动（PowerShell）
 
-以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。从版本 4 升级前先停旧 API 和 Worker，备份数据库，再执行迁移。保留 Kafka 位移和现有 Redis 投影。版本 5 可以读取既有单击事件，旧程序无法消费新批次。
+以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。已有点赞数据时先完成[停写和消费追平](#已有点赞数据升级到本场榜单)。从版本 4 升级须在旧进程退出后备份数据库，再执行迁移。保留 Kafka 位移和现有 Redis 投影。版本 5 可以读取既有单击事件，旧程序无法消费新批次。
 
 ```powershell
 docker compose --env-file .env -f deployments/docker/compose.yaml up -d
@@ -135,7 +135,7 @@ Set-Location backend
 go run ./cmd/migrate
 ```
 
-迁移成功后在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 检查 API 及实时消费相关依赖，Worker 进度单独查看。
+已有场次投影时先完成下文的排行榜补建。全新环境或补建完成后，在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 检查 API 及实时消费相关依赖，Worker 进度单独查看。
 
 `LIVESTREAM_REALTIME_CONSUMERS` 控制 API 内的实时组成员数，`LIVESTREAM_PERSISTENCE_CONSUMERS` 控制 Worker 内的持久化组成员数。两项默认均为 4，可分别设置为 1–16。变更后重启对应进程，Kafka 自动重新分配原有分区。可以用 Broker 自带命令核对两个组的成员和分区分配。
 
@@ -143,4 +143,24 @@ go run ./cmd/migrate
 docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --describe --all-groups --members --verbose
 ```
 
-新场次第一次事件到达实时消费端之前，页面可能显示“暂不可用”，不把缺失 Redis 键直接当成零。Redis/Topic 身份或检查点不一致时服务会停止消费并要求恢复；完整自动投影重建尚未实现。单 Kafka Broker 与 Redis AOF everysec 均不提供零数据丢失保证。
+新场次首次进入时初始化空榜，显示本场 0 赞。历史投影缺失会报告不可用。Redis/Topic 身份或检查点不一致时服务会停止消费并要求恢复；完整自动投影重建尚未实现。单 Kafka Broker 与 Redis AOF everysec 均不提供零数据丢失保证。
+
+## 已有点赞数据升级到本场榜单
+
+新部署会在首次进入新场次或处理首条点赞时建立排行榜。已有场次可在升级后继续同一场直播，保留升级前已接受的点击。使用原来的数据库、Redis 实例、Kafka Topic 和 `LIVESTREAM_PROJECTION_EPOCH`。
+
+1. 在维护窗口暂停产生新的点赞，排空已准入的请求。暂时保留旧 API 和 Worker 消费积压。从仓库根目录运行下列命令，确认 `live-realtime`、`live-persistence` 都已处理到各自 16 个分区的日志末端，然后正常退出旧 API 和 Worker。保持三个中间件运行。
+
+   ```sh
+   docker compose --env-file .env -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --all-groups --describe
+   ```
+
+2. 从数据库结构版本 4 升级时，先备份并在 `backend/` 执行 `go run ./cmd/migrate` 到版本 5。已经是版本 5 可以直接补榜。
+3. 在 `backend/` 使用新代码、原环境变量和数据库账号运行补建命令。
+
+   ```sh
+   go run ./cmd/backfill-like-board
+   ```
+
+   成功输出 `leaderboard_backfill_complete`。命令核对消费组成员、逐分区位移和投影身份，将 MySQL 唯一批次按用户求和，并与原场次总数核对后逐场切换。重复运行可得到相同累计数。若有积压，在保持入口停写的情况下使用原版本消费者追平，退出后重跑。Redis 身份、检查点或计数不一致时，保留现场并按[恢复设计](design/reliability.md)核对原因。
+4. 启动新版 API、Worker 和前端，确认 `/readyz` 可用。在原直播间核对本场总数、前 100 名和本人赞数，再恢复入口。已写入新榜后若需要恢复旧版消费，下一次启用榜单前需重新执行本节步骤。

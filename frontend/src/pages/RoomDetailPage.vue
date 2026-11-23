@@ -3,11 +3,13 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { closeRoom, getRoom, reopenRoom, type Room } from '../api/rooms'
 import { ApiError } from '../api/http'
 import { useRoomLikes } from '../likes'
+import LikeLeaderboard from '../components/LikeLeaderboard.vue'
 
 const props = defineProps<{ token: string; userId: string; roomId: string }>()
 const emit = defineEmits<{ back: []; expired: [] }>()
 const room = ref<Room>()
-const { connected: likeConnected, likeCount, pendingCount, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
+const { board, connected: likeConnected, likeCount, pendingCount, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
+const { rows, mine, onBoard, status: boardStatus } = board
 const feedback = ref<HTMLSpanElement>()
 let pulse: Animation | undefined
 
@@ -112,6 +114,7 @@ onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopLikes() })
         <span v-if="pendingCount">待确认批次：{{ pendingCount }}</span>
       </div>
       <p v-if="likeNotice" role="status">{{ likeNotice }}</p>
+      <LikeLeaderboard v-if="room.status === 'OPEN'" :rows="rows" :mine="mine" :on-board="onBoard" :status="boardStatus" :user-id="userId" />
       <div v-if="room.owner_id === userId" class="room-close">
         <button v-if="room.status === 'CLOSED'" class="retry-button" type="button" :disabled="busy || needsRefresh" @click="changeStatus('reopen')">重新开播</button>
         <button v-else-if="!confirming" class="retry-button danger-button" type="button" :disabled="busy || needsRefresh" @click="confirming = true">结束直播</button>

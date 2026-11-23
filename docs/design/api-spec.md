@@ -43,6 +43,7 @@
 | POST /api/v1/rooms/{id}/close | 空 JSON 对象 | Room，200 | 仅房主结束本轮直播；连续重复关闭保留本轮 closed_at |
 | POST /api/v1/rooms/{id}/reopen | 空 JSON 对象 | Room，200 | 仅房主；原房间恢复 OPEN，closed_at=null；已 OPEN 时返回当前房间 |
 | POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path、session_id，201 | 仅开放房间；规则见下文 |
+| GET /api/v1/rooms/{id}/sessions/{session_id}/like-leaderboard | Bearer，无查询参数 | 本场榜单与本人累计数，200 | 登录用户可读，首次进入与补取共用 |
 | GET /api/v1/rooms/{id}/danmaku | limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | P6 起；已落库数据按 id 倒序 |
 | GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
 
@@ -59,6 +60,18 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 响应不缓存，设置 Cache-Control: no-store。ws_path 形如 /ws/rooms/1001?ticket=短时票据，前端根据当前环境补充 ws 或 wss 地址。原始票据只用于一次握手，握手失败后重新申请。不能将 access_token 放入此 URL。
 
 票据数量上限见 [架构容量边界](architecture.md)；超限拒绝申请，不无限缓存。API 重启会使未使用票据失效，客户端重新申请即可。浏览器 WebSocket 构造函数没有自定义请求头参数，因此采用 HTTP 换票方式，见 [MDN API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/WebSocket)。
+
+## 本场点赞榜
+
+房间必须开放，路径里的场次必须是当前这一场。接口通过登录令牌确认本人身份，返回带有 `Cache-Control: no-store` 的完整快照。下例中，当前用户还未点赞。
+
+```json
+{"data":{"room_id":"8","session_id":"11","projection_epoch":"a1b29c9b-91dc-4162-9285-84803df6649c","revision":"5","likes_revision":"5","top":[{"rank":1,"user_id":"2","username":"alice","count":"5"}],"me":{"count":"0"}}}
+```
+
+`top` 按名次返回 0–100 行。ID、计数和版本都用十进制字符串，名次为从 1 开始的 JSON 整数。本人在榜时 `me` 包含 `rank`，榜外只返回 `count`。同一场次与投影代次内，`revision` 表示最近一次公共榜单变化，`likes_revision` 表示读取个人数时的场次版本。榜外用户增加点击数时，两个版本可以不同。
+
+未登录返回 401。无效场次编号或附加查询参数返回 400，房间不存在返回 404，场次已结束或与当前房间不匹配返回 409。投影或依赖不可用返回 503。成功读取且无人点赞时才返回空榜。
 
 ## 统计响应
 

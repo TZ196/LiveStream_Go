@@ -43,6 +43,11 @@ func (initializer *ProjectionInitializer) Ensure(ctx context.Context, event Like
 	if err != nil {
 		return err
 	}
+	return initializer.EnsureSession(ctx, roomID, sessionID)
+}
+
+// EnsureSession 由已校验场次的读入口和消费者共享，首赞前也能返回真实的空榜。
+func (initializer *ProjectionInitializer) EnsureSession(ctx context.Context, roomID, sessionID uint64) error {
 	return initializer.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		row := projectionSession{Epoch: initializer.projection.epoch, SessionID: sessionID, RoomID: roomID, Status: "INITIALIZING"}
 		insert := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
@@ -56,10 +61,10 @@ func (initializer *ProjectionInitializer) Ensure(ctx context.Context, event Like
 		if stored.RoomID != roomID {
 			return errors.New("场次与房间不匹配")
 		}
-		key := "ls:v1:projection:" + row.Epoch + ":session:" + event.SessionID
+		key := "ls:v1:projection:" + row.Epoch + ":session:" + strconv.FormatUint(sessionID, 10)
 		switch stored.Status {
 		case "INITIALIZING":
-			if err := initializer.projection.InitializeNewSession(ctx, event.RoomID, event.SessionID); err != nil {
+			if err := initializer.projection.InitializeNewSession(ctx, strconv.FormatUint(roomID, 10), strconv.FormatUint(sessionID, 10)); err != nil {
 				return err
 			}
 			return tx.Model(&projectionSession{}).Where("epoch = ? AND session_id = ?", row.Epoch, sessionID).Update("status", "READY").Error

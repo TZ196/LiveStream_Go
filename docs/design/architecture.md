@@ -16,7 +16,7 @@ P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport �
 
 浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。最终事件流为：API 校验请求 → Kafka live.events → 两个独立消费者组。
 
-live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流，每组默认 4 个可配置成员，各自分担 16 个分区。实时成员共用同一个 API 内的连接管理器，每个活跃场次仅保留一个最高版本的待推送快照。API 每 200 毫秒广播有变化的场次。
+live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流，每组默认 4 个可配置成员，各自分担 16 个分区。实时成员共用同一个 API 内的连接管理器，每个活跃场次仅保留一个最高版本的待推送快照。API 每 200 毫秒广播有变化的场次总数。另一个每秒运行的任务合并名次变化，并向点赞者在本场的所有连接推送个人累计数。公共榜单按在线场次缓存最多 100 个用户名，最后一个连接离开时释放缓存。
 
 RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞从 P4 首次交付起以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，禁止 Producer 在发布前直接增加点赞数。发布前不读写 Redis 请求记录；事件时间由客户端 UUIDv7 request_id 确定。
 

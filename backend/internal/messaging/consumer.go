@@ -22,10 +22,16 @@ type Consumer struct {
 
 // NewConsumer 创建一个消费组成员，并要求 live.events 已存在且有稳定 Topic UUID。
 func NewConsumer(ctx context.Context, brokers []string, group string) (*Consumer, error) {
+	return newKafkaClient(ctx, brokers, group, kgo.ConsumerGroup(group), kgo.ConsumeTopics("live.events"),
+		kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll(), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+}
+
+// 维护命令也要验证相同的 Topic 和分区；省略订阅选项时只查询元数据和位移，不参与组内分配。
+func newKafkaClient(ctx context.Context, brokers []string, group string, opts ...kgo.Opt) (*Consumer, error) {
 	if len(brokers) == 0 || (group != "live-realtime" && group != "live-persistence") {
 		return nil, errors.New("Kafka 地址或消费组无效")
 	}
-	client, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ConsumerGroup(group), kgo.ConsumeTopics("live.events"), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll(), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	client, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(brokers...)}, opts...)...)
 	if err != nil {
 		return nil, err
 	}
