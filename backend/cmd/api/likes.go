@@ -38,26 +38,15 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 		_ = redisClient.Close()
 		return nil, fmt.Errorf("连接 Redis: %w", err)
 	}
-	consumer, err := messaging.NewConsumer(startup, cfg.Brokers, "live-realtime")
-	if err != nil {
-		producer.Close()
-		_ = redisClient.Close()
-		return nil, err
-	}
 	projection, err := messaging.NewProjectionRepository(redisClient, cfg.ProjectionEpoch)
 	if err != nil {
-		consumer.Close()
 		producer.Close()
 		_ = redisClient.Close()
 		return nil, err
 	}
 	initializer := messaging.NewProjectionInitializer(db, projection)
-	committed, err := consumer.CommittedOffsets(startup)
-	if err == nil {
-		err = initializer.ValidateProjectionStartup(startup, consumer.TopicID(), committed)
-	}
+	consumer, err := messaging.OpenConsumerGroup(startup, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
 	if err != nil {
-		consumer.Close()
 		producer.Close()
 		_ = redisClient.Close()
 		return nil, fmt.Errorf("实时投影检查: %w", err)
@@ -67,7 +56,13 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 	manager.SetAvailable(true)
 	ctx, stop := context.WithCancel(parent)
 	var wait sync.WaitGroup
-	wait.Add(1)
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		manager.RunLikeUpdates(ctx)
+		// 先终止长连接读循环，Hertz 才能在关闭预算内回收升级后的请求。
+		manager.Close()
+	}()
 	go func() {
 		defer wait.Done()
 		current := consumer
@@ -88,7 +83,7 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 				if err != nil {
 					return err
 				}
-				manager.BroadcastLike(event, result, cfg.ProjectionEpoch)
+				manager.QueueLikeUpdate(event, result)
 				return nil
 			})
 			current.Close()
@@ -105,22 +100,13 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 				case <-time.After(5 * time.Second):
 				}
 				check, cancel := context.WithTimeout(ctx, 10*time.Second)
-				next, createErr := messaging.NewConsumer(check, cfg.Brokers, "live-realtime")
-				if createErr == nil {
-					offsets, offsetErr := next.CommittedOffsets(check)
-					if offsetErr == nil {
-						offsetErr = initializer.ValidateProjectionStartup(check, next.TopicID(), offsets)
-					}
-					if offsetErr == nil {
-						cancel()
-						current = next
-						manager.SetAvailable(true)
-						break
-					}
-					next.Close()
-					createErr = offsetErr
-				}
+				next, createErr := messaging.OpenConsumerGroup(check, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
 				cancel()
+				if createErr == nil {
+					current = next
+					manager.Resume()
+					break
+				}
 				logger.Error("realtime_consumer_waiting", "error", createErr)
 			}
 		}

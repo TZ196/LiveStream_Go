@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
@@ -18,7 +20,7 @@ type Consumer struct {
 	partitions []int32
 }
 
-// NewConsumer 创建独立消费组，并要求 live.events 已存在且有稳定 Topic UUID。
+// NewConsumer 创建一个消费组成员，并要求 live.events 已存在且有稳定 Topic UUID。
 func NewConsumer(ctx context.Context, brokers []string, group string) (*Consumer, error) {
 	if len(brokers) == 0 || (group != "live-realtime" && group != "live-persistence") {
 		return nil, errors.New("Kafka 地址或消费组无效")
@@ -79,11 +81,14 @@ func (consumer *Consumer) Run(ctx context.Context, process func(context.Context,
 			if processingErr != nil {
 				return
 			}
-			if err := process(ctx, record, consumer.topicID); err != nil {
+			// 停止拉取后，已取出的记录仍有独立期限完成业务写入和 offset 提交。
+			recordCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer done()
+			if err := process(recordCtx, record, consumer.topicID); err != nil {
 				processingErr = err
 				return
 			}
-			if err := consumer.client.CommitRecords(ctx, record); err != nil {
+			if err := consumer.client.CommitRecords(recordCtx, record); err != nil {
 				processingErr = fmt.Errorf("提交 Kafka 位移: %w", err)
 			}
 		})
@@ -112,28 +117,31 @@ func (consumer *Consumer) CommittedOffsets(ctx context.Context) (map[int32]int64
 	}
 	result := make(map[int32]int64, len(consumer.partitions))
 	if response.Version >= 8 {
-		if len(response.Groups) != 1 || response.Groups[0].ErrorCode != 0 {
+		if len(response.Groups) != 1 {
 			return nil, errors.New("读取 Kafka 消费组位移失败")
+		}
+		if err := kerr.ErrorForCode(response.Groups[0].ErrorCode); err != nil {
+			return nil, fmt.Errorf("读取 Kafka 消费组位移: %w", err)
 		}
 		for _, topic := range response.Groups[0].Topics {
 			if topic.Topic == "live.events" {
 				for _, part := range topic.Partitions {
-					if part.ErrorCode != 0 {
-						return nil, errors.New("读取 Kafka 分区位移失败")
+					if err := kerr.ErrorForCode(part.ErrorCode); err != nil {
+						return nil, fmt.Errorf("读取 Kafka 分区位移: %w", err)
 					}
 					result[part.Partition] = part.Offset
 				}
 			}
 		}
 	} else {
-		if response.ErrorCode != 0 {
-			return nil, errors.New("读取 Kafka 消费组位移失败")
+		if err := kerr.ErrorForCode(response.ErrorCode); err != nil {
+			return nil, fmt.Errorf("读取 Kafka 消费组位移: %w", err)
 		}
 		for _, topic := range response.Topics {
 			if topic.Topic == "live.events" {
 				for _, part := range topic.Partitions {
-					if part.ErrorCode != 0 {
-						return nil, errors.New("读取 Kafka 分区位移失败")
+					if err := kerr.ErrorForCode(part.ErrorCode); err != nil {
+						return nil, fmt.Errorf("读取 Kafka 分区位移: %w", err)
 					}
 					result[part.Partition] = part.Offset
 				}

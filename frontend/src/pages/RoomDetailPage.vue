@@ -7,7 +7,21 @@ import { useRoomLikes } from '../likes'
 const props = defineProps<{ token: string; userId: string; roomId: string }>()
 const emit = defineEmits<{ back: []; expired: [] }>()
 const room = ref<Room>()
-const { connected: likeConnected, likeCount, pendingCount, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
+const { connected: likeConnected, likeCount, pendingCount, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
+const feedback = ref<HTMLSpanElement>()
+let pulse: Animation | undefined
+
+// 点击立即播放一次局部反馈，权威总数由服务端快照更新。
+function clickLike() {
+  if (!like() || !feedback.value) return
+  pulse?.cancel()
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  pulse = feedback.value.animate([
+    { opacity: 1, transform: 'translateY(0)' },
+    { opacity: 0, transform: reducedMotion ? 'none' : 'translateY(-14px)' },
+  ], { duration: 350 })
+}
+
 const busy = ref(false)
 const confirming = ref(false)
 const needsRefresh = ref(false)
@@ -69,7 +83,7 @@ async function changeStatus(action: 'close' | 'reopen') {
 }
 
 onMounted(() => { void loadRoom() })
-onBeforeUnmount(() => { controller?.abort(); stopLikes() })
+onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopLikes() })
 </script>
 
 <template>
@@ -91,9 +105,11 @@ onBeforeUnmount(() => { controller?.abort(); stopLikes() })
       </dl>
       <p class="account-notice">{{ room.status === 'CLOSED' ? '本次直播已结束，房主可以在这个房间重新开播。' : '房间已开放，欢迎点赞。' }}</p>
       <div v-if="room.status === 'OPEN'" class="room-actions">
-        <button class="retry-button" type="button" :disabled="!likeConnected || pendingCount >= 100" @click="like">点赞</button>
+        <button class="retry-button like-button" type="button" :disabled="!likeConnected || full" @click="clickLike">
+          点赞<span ref="feedback" class="like-feedback" aria-hidden="true">+1</span>
+        </button>
         <span>本场点赞：{{ likeCount ?? '暂不可用' }}</span>
-        <span v-if="pendingCount">待确认：{{ pendingCount }}</span>
+        <span v-if="pendingCount">待确认批次：{{ pendingCount }}</span>
       </div>
       <p v-if="likeNotice" role="status">{{ likeNotice }}</p>
       <div v-if="room.owner_id === userId" class="room-close">
@@ -110,3 +126,17 @@ onBeforeUnmount(() => { controller?.abort(); stopLikes() })
     </article>
   </section>
 </template>
+
+<style scoped>
+.like-button {
+  position: relative;
+}
+
+.like-feedback {
+  position: absolute;
+  right: 0;
+  top: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+</style>

@@ -12,23 +12,65 @@ import (
 	"github.com/google/uuid"
 )
 
-// LikeEvent 是发送给 Kafka 的单次点赞事件；一次事件固定表示一次点击。
+// LikeEvent 保存一个不可拆分的点赞批次；版本 1 的历史事件固定为一次点击。
 type LikeEvent struct {
-	SchemaVersion int      `json:"schema_version"`
-	EventID       string   `json:"event_id"`
-	EventType     string   `json:"event_type"`
-	RequestID     string   `json:"request_id"`
-	RequestHash   string   `json:"request_hash"`
-	RoomID        string   `json:"room_id"`
-	SessionID     string   `json:"session_id"`
-	UserID        string   `json:"user_id"`
-	Timestamp     int64    `json:"timestamp"`
-	Payload       struct{} `json:"payload"`
+	SchemaVersion int         `json:"schema_version"`
+	EventID       string      `json:"event_id"`
+	EventType     string      `json:"event_type"`
+	RequestID     string      `json:"request_id"`
+	RequestHash   string      `json:"request_hash"`
+	RoomID        string      `json:"room_id"`
+	SessionID     string      `json:"session_id"`
+	UserID        string      `json:"user_id"`
+	Timestamp     int64       `json:"timestamp"`
+	Payload       LikePayload `json:"payload"`
+}
+
+type LikePayload struct {
+	Count int64 `json:"count,omitempty"`
+}
+
+// UnmarshalJSON 区分旧格式的空对象与显式 count。显式的零、负数和额外字段均无效。
+func (payload *LikePayload) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
+		return errors.New("点赞数据必须为对象")
+	}
+	if len(fields) == 0 {
+		payload.Count = 0
+		return nil
+	}
+	count, err := strconv.ParseInt(string(fields["count"]), 10, 64)
+	if len(fields) != 1 || err != nil || count < 1 {
+		return errors.New("count 必须为正整数")
+	}
+	payload.Count = count
+	return nil
+}
+
+// ClickCount 将旧的空载荷还原成一次点击。
+func (event LikeEvent) ClickCount() int64 {
+	if event.SchemaVersion == 1 {
+		return 1
+	}
+	return event.Payload.Count
 }
 
 // NewLikeEvent 从已认证的用户和已校验的场次构造稳定事件，不进行 Redis 操作。
 // 调用方负责验证用户权限、场次归属及开放状态。
 func NewLikeEvent(userID, roomID, sessionID, requestID string, now time.Time) (LikeEvent, error) {
+	return buildLikeEvent(userID, roomID, sessionID, requestID, 1, 1, now)
+}
+
+// NewLikeBatch 冻结本次点击数；同一请求在任何重试中都使用相同的数量与身份。
+func NewLikeBatch(userID, roomID, sessionID, requestID string, count int64, now time.Time) (LikeEvent, error) {
+	if count < 1 {
+		return LikeEvent{}, errors.New("点赞批次数量必须为正整数")
+	}
+	return buildLikeEvent(userID, roomID, sessionID, requestID, 2, count, now)
+}
+
+func buildLikeEvent(userID, roomID, sessionID, requestID string, version int, count int64, now time.Time) (LikeEvent, error) {
 	for _, value := range []string{userID, roomID, sessionID} {
 		number, err := strconv.ParseUint(value, 10, 64)
 		if err != nil || number == 0 || strconv.FormatUint(number, 10) != value {
@@ -45,8 +87,17 @@ func NewLikeEvent(userID, roomID, sessionID, requestID string, now time.Time) (L
 		return LikeEvent{}, errors.New("request_id 时间超出允许窗口")
 	}
 	eventID := uuid.NewSHA1(uuid.NameSpaceURL, []byte("livestream/v2/"+userID+"/"+requestID))
-	fingerprint := sha256.Sum256([]byte("LIKE_CLICKED\n" + roomID + "\n" + sessionID + "\n"))
-	return LikeEvent{SchemaVersion: 1, EventID: eventID.String(), EventType: "LIKE_CLICKED", RequestID: requestID,
+	canonical := "LIKE_CLICKED\n" + roomID + "\n" + sessionID + "\n"
+	// 数量为 1 时沿用旧指纹，升级前的待确认请求仍可安全重试。
+	if count != 1 {
+		canonical += strconv.FormatInt(count, 10) + "\n"
+	}
+	fingerprint := sha256.Sum256([]byte(canonical))
+	var payload LikePayload
+	if version == 2 {
+		payload.Count = count
+	}
+	return LikeEvent{SchemaVersion: version, Payload: payload, EventID: eventID.String(), EventType: "LIKE_CLICKED", RequestID: requestID,
 		RequestHash: hex.EncodeToString(fingerprint[:]), RoomID: roomID, SessionID: sessionID,
 		UserID: userID, Timestamp: millis}, nil
 }

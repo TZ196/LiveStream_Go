@@ -39,7 +39,17 @@ func DecodeLikeRecord(record *kgo.Record) (LikeEvent, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return LikeEvent{}, errors.New("事件包含多余内容")
 	}
-	expected, err := NewLikeEvent(event.UserID, event.RoomID, event.SessionID, event.RequestID, time.UnixMilli(event.Timestamp))
+	var expected LikeEvent
+	var err error
+	eventTime := time.UnixMilli(event.Timestamp)
+	switch event.SchemaVersion {
+	case 1:
+		expected, err = NewLikeEvent(event.UserID, event.RoomID, event.SessionID, event.RequestID, eventTime)
+	case 2:
+		expected, err = NewLikeBatch(event.UserID, event.RoomID, event.SessionID, event.RequestID, event.Payload.Count, eventTime)
+	default:
+		return LikeEvent{}, errors.New("未知的点赞事件版本")
+	}
 	if err != nil {
 		return LikeEvent{}, err
 	}
@@ -91,8 +101,8 @@ func (repository *PersistenceRepository) PersistLike(ctx context.Context, record
 				return errors.New("相同事件 ID 的内容发生冲突")
 			}
 		} else {
-			sql = `INSERT INTO interaction_events (event_id, room_id, session_id, user_id, event_type, created_at) VALUES (?, ?, ?, ?, ?, ?)`
-			if err := tx.Exec(sql, event.EventID, event.RoomID, event.SessionID, event.UserID, event.EventType, time.UnixMilli(event.Timestamp).UTC()).Error; err != nil {
+			sql = `INSERT INTO interaction_events (event_id, room_id, session_id, user_id, event_type, created_at, click_count) VALUES (?, ?, ?, ?, ?, ?, ?)`
+			if err := tx.Exec(sql, event.EventID, event.RoomID, event.SessionID, event.UserID, event.EventType, time.UnixMilli(event.Timestamp).UTC(), event.ClickCount()).Error; err != nil {
 				return err
 			}
 		}

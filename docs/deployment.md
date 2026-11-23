@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前版本为 4：版本 3 的数据库会新增场次、点赞及消费记录表；旧 OPEN 房间创建开始时间未知的活动场次。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前要求应用数据库结构版本 5。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -122,7 +122,7 @@ Kafka 需要分别公布宿主和容器客户端地址，并配置独立 Control
 
 ## 本地点赞链路启动（PowerShell）
 
-以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。迁移前备份已有数据库；版本 4 不删除原房间，旧 OPEN 房间的开始时间未知。
+以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。从版本 4 升级前先停旧 API 和 Worker，备份数据库，再执行迁移。保留 Kafka 位移和现有 Redis 投影。版本 5 可以读取既有单击事件，旧程序无法消费新批次。
 
 ```powershell
 docker compose --env-file .env -f deployments/docker/compose.yaml up -d
@@ -135,6 +135,12 @@ Set-Location backend
 go run ./cmd/migrate
 ```
 
-迁移成功后在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 检查 API 及实时消费相关依赖，但不检查独立 Worker，需另行确认 Worker 进程和日志。
+迁移成功后在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 检查 API 及实时消费相关依赖，Worker 进度单独查看。
+
+`LIVESTREAM_REALTIME_CONSUMERS` 控制 API 内的实时组成员数，`LIVESTREAM_PERSISTENCE_CONSUMERS` 控制 Worker 内的持久化组成员数。两项默认均为 4，可分别设置为 1–16。变更后重启对应进程，Kafka 自动重新分配原有分区。可以用 Broker 自带命令核对两个组的成员和分区分配。
+
+```sh
+docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --describe --all-groups --members --verbose
+```
 
 新场次第一次事件到达实时消费端之前，页面可能显示“暂不可用”，不把缺失 Redis 键直接当成零。Redis/Topic 身份或检查点不一致时服务会停止消费并要求恢复；完整自动投影重建尚未实现。单 Kafka Broker 与 Redis AOF everysec 均不提供零数据丢失保证。
