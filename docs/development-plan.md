@@ -68,4 +68,4 @@ P4/P5 接入前锁定 Redis/Kafka 客户端和镜像版本，测量 Redis 键与
 
 ## 当前点赞子链路实现边界
 
-已接通固定房间下的独立场次、一次性票据、WebSocket 点赞、Kafka Producer、Redis 实时消费和 MySQL Worker。现有实现覆盖点赞子集；P3 弹幕、在线人数、完整 WebSocket 协议和 P6 投影重建尚未交付，不能将整个 P3/P4 验收视为完成。点赞已接入前端 500 毫秒聚合、200 毫秒同场快照和每组默认 4 个成员。兼容性、重发和成员分配实测见 [批量点赞验证](verification/reports/batched-likes.md)。此前的 Redis 故障和 Worker 积压见 [点赞链路报告](verification/reports/likes-chain.md)。
+已接通固定房间下的独立场次、一次性票据、WebSocket 点赞、Kafka Producer、Redis 实时消费和 MySQL Worker。现有实现覆盖点赞子集；P3 弹幕、在线人数、完整 WebSocket 协议和 P6 投影重建尚未交付，不能将整个 P3/P4 验收视为完成。点赞已接入前端 500 毫秒聚合、200 毫秒同场快照和每组默认 4 个成员。此前的 Redis 故障和 Worker 积压见 [点赞链路报告](verification/reports/likes-chain.md)。

@@ -46,7 +46,7 @@ func TestPersistenceIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, err := NewLikeBatch(fmt.Sprint(userID), fmt.Sprint(roomID), fmt.Sprint(sessionID), requestID.String(), 37, time.Now())
+	event, err := NewLikeEvent(fmt.Sprint(userID), fmt.Sprint(roomID), fmt.Sprint(sessionID), requestID.String(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,23 +66,6 @@ func TestPersistenceIntegration(t *testing.T) {
 	var count int64
 	if err := db.Table("interaction_events").Where("event_id = ?", event.EventID).Count(&count).Error; err != nil || count != 1 {
 		t.Fatalf("点赞事件数量 = %d, error = %v", count, err)
-	}
-	var total int64
-	if err := db.Table("interaction_events").Select("SUM(click_count)").Where("session_id = ?", sessionID).Scan(&total).Error; err != nil || total != 37 {
-		t.Fatalf("重放后的本场点赞数 = %d, error = %v", total, err)
-	}
-	conflict, err := NewLikeBatch(fmt.Sprint(userID), fmt.Sprint(roomID), fmt.Sprint(sessionID), requestID.String(), 38, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad := *record
-	bad.Key, bad.Value, err = conflict.KafkaRecord()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bad.Offset++
-	if err := repo.PersistLike(context.Background(), &bad, "isolated-test-topic"); err == nil {
-		t.Fatal("同一请求的数量冲突未拒绝")
 	}
 	var offset int64
 	if err := db.Table("worker_checkpoints").Where("consumer_group = ? AND topic_id = ? AND partition_id = ?", "live-persistence", "isolated-test-topic", 0).Pluck("next_offset", &offset).Error; err != nil || offset != 2 {

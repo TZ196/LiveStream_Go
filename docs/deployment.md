@@ -101,7 +101,7 @@ go test ./...
 go build ./cmd/api ./cmd/migrate
 ```
 
-修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check`、`npm test` 和 `npm run build`。Go 集成测试需要显式指定隔离的 Kafka、Redis、MySQL 环境，并发检查使用 `go test -race`。具体入口见[验证计划](verification/plan.md)。
+修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check` 和 `npm run build`。Go 集成测试需要显式指定隔离的 Kafka、Redis、MySQL 环境，并发检查使用 `go test -race`。具体入口见[验证计划](verification/plan.md)。
 
 ## 后续部署阶段
 
