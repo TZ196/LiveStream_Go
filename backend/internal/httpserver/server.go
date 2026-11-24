@@ -76,6 +76,7 @@ func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Servic
 	roomsAPI.POST("", apiServer.createRoom)
 	roomsAPI.GET("", apiServer.listRooms)
 	roomsAPI.GET("/:id", apiServer.getRoom)
+	roomsAPI.GET("/:id/likes-state", apiServer.likesState)
 	roomsAPI.POST("/:id/close", apiServer.closeRoom)
 	roomsAPI.POST("/:id/reopen", apiServer.reopenRoom)
 	return apiServer
@@ -142,30 +143,9 @@ func (s *Server) readiness(ctx context.Context, c *app.RequestContext) {
 	recovery := "not_applicable"
 	if s.realtime != nil {
 		stage = "P4-likes"
-		recovery = "ready"
-		check, cancel := context.WithTimeout(ctx, time.Second)
-		redisReady, kafkaReady, consumerReady := s.realtime.Health(check)
-		cancel()
-		dependencies["redis"] = "unavailable"
-		dependencies["kafka"] = "unavailable"
-		dependencies["realtime_consumer"] = "paused"
-		if redisReady {
-			dependencies["redis"] = "ready"
-		}
-		if kafkaReady {
-			dependencies["kafka"] = "ready"
-		}
-		if consumerReady {
-			dependencies["realtime_consumer"] = "ready"
-		}
-		if !redisReady || !kafkaReady || !consumerReady {
-			recovery = "degraded"
-			if status != "stopping" {
-				status = "not_ready"
-				statusCode = consts.StatusServiceUnavailable
-			}
-		}
+		recovery = s.realtime.State()
 	}
+
 	if s.state.Load() == stateStopping {
 		status = "stopping"
 		statusCode = consts.StatusServiceUnavailable

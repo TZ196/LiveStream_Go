@@ -96,6 +96,13 @@ func (s *Server) createRoom(ctx context.Context, c *app.RequestContext) {
 	if !readRoomObject(c, &input) {
 		return
 	}
+	if s.realtime != nil {
+		if !s.realtime.BeginRoomChange() {
+			writeAPIError(c, 503, "LIKES_UNAVAILABLE", "点赞恢复期间暂不能改变直播场次", true)
+			return
+		}
+		defer s.realtime.UnlockAdmission()
+	}
 	value, err := s.rooms.Create(ctx, identity.UserID, input.Title)
 	if err != nil {
 		s.roomError(ctx, c, err)
@@ -189,7 +196,10 @@ func (s *Server) closeRoom(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	if s.realtime != nil {
-		s.realtime.LockAdmission()
+		if !s.realtime.BeginRoomChange() {
+			writeAPIError(c, 503, "LIKES_UNAVAILABLE", "点赞恢复期间暂不能改变直播场次", true)
+			return
+		}
 	}
 	value, err := s.rooms.Close(ctx, id, identity.UserID)
 	if s.realtime != nil {
@@ -223,7 +233,10 @@ func (s *Server) reopenRoom(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	if s.realtime != nil {
-		s.realtime.LockAdmission()
+		if !s.realtime.BeginRoomChange() {
+			writeAPIError(c, 503, "LIKES_UNAVAILABLE", "点赞恢复期间暂不能改变直播场次", true)
+			return
+		}
 		defer s.realtime.UnlockAdmission()
 	}
 	value, err := s.rooms.Reopen(ctx, id, identity.UserID)

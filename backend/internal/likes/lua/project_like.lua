@@ -1,4 +1,5 @@
 local meta, seen, partition, users, top = unpack(KEYS)
+check_instance(ARGV[7])
 local room, fingerprint, ttl, next_offset, clicks, user = unpack(ARGV)
 if redis.call('HGET', meta, 'initialized') ~= '1' or redis.call('HGET', meta, 'room_id') ~= room then error('PROJECTION_NOT_READY') end
 local board_revision, revision, likes = check_board(meta, users, top)

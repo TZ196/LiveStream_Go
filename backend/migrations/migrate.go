@@ -88,6 +88,8 @@ func applyPending(db *gorm.DB, logger *slog.Logger) error {
 			err = createLikesV4(db)
 		case 5:
 			err = createLikeBatchCountV5(db)
+		case 6:
+			err = createProjectionStateV6(db)
 		default:
 			err = fmt.Errorf("版本 %d 尚未定义迁移步骤", version)
 		}

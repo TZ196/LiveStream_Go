@@ -24,10 +24,9 @@ type Manager struct {
 	Tickets     *Tickets
 	rooms       *room.Service
 	producer    *likes.Producer
-	projection  *likes.ProjectionRepository
-	initializer *likes.ProjectionInitializer
 	users       *user.Repository
-	epoch       string
+	current     atomic.Pointer[projectionState]
+	state       atomic.Value // CHECKING、READY、RECOVERING、BLOCKED；只存 string。
 	available   atomic.Bool
 	admission   sync.RWMutex
 	mu          sync.RWMutex
@@ -35,6 +34,13 @@ type Manager struct {
 	metrics     *deliveryMetrics
 	connections atomic.Uint64
 	stopping    bool // 受 admission 保护
+}
+
+// 一次替换整个依赖快照，使 HTTP、广播和消费者读取到同一个投影代次。
+type projectionState struct {
+	projection  *likes.ProjectionRepository
+	initializer *likes.ProjectionInitializer
+	epoch       string
 }
 
 type frame struct {
@@ -47,13 +53,19 @@ type frame struct {
 
 // NewManager 组装房间查询、一次性票据和 Kafka Producer。
 func NewManager(rooms *room.Service, producer *likes.Producer, projection *likes.ProjectionRepository, initializer *likes.ProjectionInitializer, users *user.Repository, epoch string) *Manager {
-	manager := &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, initializer: initializer, users: users, epoch: epoch, audiences: make(map[uint64]*audience)}
+	manager := &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, users: users, audiences: make(map[uint64]*audience)}
+	manager.current.Store(&projectionState{projection: projection, initializer: initializer, epoch: epoch})
+	manager.state.Store("CHECKING")
 	manager.metrics = newDeliveryMetrics(manager)
 	return manager
 }
 
 // ServeHTTP 消费一次性票据，完成 WebSocket 握手并读取用户消息。
 func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if !manager.available.Load() {
+		http.Error(writer, "likes unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	roomText := strings.TrimPrefix(request.URL.Path, "/ws/rooms/")
 	roomID, err := strconv.ParseUint(roomText, 10, 64)
 	if err != nil || roomID == 0 || strconv.FormatUint(roomID, 10) != roomText || len(request.URL.Query()) != 1 || len(request.URL.Query()["ticket"]) != 1 {
@@ -84,23 +96,25 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		client.close("admission")
 		return
 	}
-	if manager.stopping {
+	if manager.stopping || !manager.available.Load() {
 		manager.admission.RUnlock()
 		client.close("admission")
 		return
 	}
 	userID := strconv.FormatUint(proof.identity.UserID, 10)
 	view := manager.register(roomID, session.ID, userID, client)
-	manager.admission.RUnlock()
 	defer manager.unregister(session.ID, view, userID, client)
+	current := manager.current.Load()
 	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), time.Second)
 	var snapshot likes.ProjectedLike
-	snapshotErr := manager.initializer.EnsureSession(snapshotCtx, roomID, session.ID)
+	snapshotErr := current.initializer.EnsureSession(snapshotCtx, roomID, session.ID)
 	if snapshotErr == nil {
-		snapshot, snapshotErr = manager.projection.ReadSession(snapshotCtx, roomText, strconv.FormatUint(session.ID, 10))
+		snapshot, snapshotErr = current.projection.ReadSession(snapshotCtx, roomText, strconv.FormatUint(session.ID, 10))
 	}
 	snapshotCancel()
+	manager.admission.RUnlock()
 	if snapshotErr != nil && manager.available.Load() {
+		manager.SetAvailable(false)
 		// 首屏读取失败时重新握手，即使没有后续点赞也会再次读取权威计数。
 		return
 	}
@@ -113,7 +127,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		count = snapshot.Count
 		revision = snapshot.Revision
 	}
-	initial, _ := json.Marshal(map[string]any{"version": 1, "type": "ROOM_STATE", "data": map[string]any{"room_id": roomText, "session_id": strconv.FormatUint(session.ID, 10), "like_count": count, "likes_available": snapshotErr == nil, "projection_epoch": manager.epoch, "likes_revision": revision, "delivery_probe": client.probe != nil}})
+	initial, _ := json.Marshal(map[string]any{"version": 1, "type": "ROOM_STATE", "data": map[string]any{"room_id": roomText, "session_id": strconv.FormatUint(session.ID, 10), "like_count": count, "likes_available": snapshotErr == nil, "projection_epoch": current.epoch, "likes_revision": revision, "delivery_probe": client.probe != nil}})
 	// 注册到读取 Redis 之间的更新已进入有界队列，先写首屏，再由写协程按序排空。
 	go client.writeLoop(proof.identity.ExpiresAt, initial)
 	if snapshotErr != nil {
@@ -126,8 +140,6 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 // readMessages 在握手和首屏写协程建立后运行，负责单连接读帧、准入和接受确认。
 func (manager *Manager) readMessages(client *connection, proof ticket) {
 	socket := client.socket
-	roomID := proof.roomID
-	roomText := strconv.FormatUint(roomID, 10)
 	socket.SetReadLimit(8 * 1024)
 	deadline := func() time.Time {
 		next := time.Now().Add(60 * time.Second)
@@ -177,18 +189,12 @@ func (manager *Manager) readMessages(client *connection, proof ticket) {
 		if err != nil {
 			return
 		}
-		manager.admission.RLock()
-		active, err := manager.rooms.ActiveSession(context.Background(), roomID)
-		manager.admission.RUnlock()
-		if err != nil || active.ID != proof.sessionID {
-			return
-		}
-		event, err := likes.NewLikeBatch(strconv.FormatUint(proof.identity.UserID, 10), roomText, input.SessionID, input.RequestID, count, time.Now())
+		event, err := likes.NewLikeBatch(strconv.FormatUint(proof.identity.UserID, 10), strconv.FormatUint(proof.roomID, 10), input.SessionID, input.RequestID, count, time.Now())
 		if err != nil {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = manager.producer.PublishLike(ctx, event)
+		err = manager.publishLike(ctx, proof, event)
 		cancel()
 		if err != nil {
 			continue
@@ -196,6 +202,20 @@ func (manager *Manager) readMessages(client *connection, proof ticket) {
 		ack, _ := json.Marshal(map[string]any{"version": 1, "type": "ACK", "request_id": event.RequestID, "event_id": event.EventID, "data": map[string]any{"status": "accepted", "accepted_via": "kafka", "accepted_at": nil}})
 		client.enqueue(ack)
 	}
+}
+
+// publishLike 持有准入读锁直到发送结束；暂停取得写锁后，所有旧发送都已返回。
+func (manager *Manager) publishLike(ctx context.Context, proof ticket, event likes.LikeEvent) error {
+	manager.admission.RLock()
+	defer manager.admission.RUnlock()
+	if manager.stopping || !manager.available.Load() {
+		return errors.New("点赞接收已暂停")
+	}
+	active, err := manager.rooms.ActiveSession(ctx, proof.roomID)
+	if err != nil || active.ID != proof.sessionID {
+		return errors.New("直播场次已改变")
+	}
+	return manager.producer.PublishLike(ctx, event)
 }
 
 // readLikeCount 兼容旧客户端的空对象；新请求只接收正的 int64 点击数。
@@ -229,6 +249,7 @@ func (manager *Manager) Close() {
 	manager.admission.Lock()
 	manager.stopping = true
 	manager.available.Store(false)
+	manager.state.Store("RECOVERING")
 	clients := manager.detachRooms(0)
 	manager.admission.Unlock()
 	closeClients(clients, "shutdown")
@@ -243,15 +264,23 @@ func (manager *Manager) Resume() {
 	}
 	clients := manager.detachRooms(0)
 	manager.available.Store(true)
+	manager.state.Store("READY")
 	manager.admission.Unlock()
 	closeClients(clients, "recovery")
 }
 
-// LockAdmission 在房间关闭或重开时阻止新的连接和点赞准入。
-func (manager *Manager) LockAdmission() { manager.admission.Lock() }
-
 // UnlockAdmission 在房间状态和连接处理完成后释放准入锁。
 func (manager *Manager) UnlockAdmission() { manager.admission.Unlock() }
+
+// BeginRoomChange 与恢复暂停互斥，避免构建快照时改变场次集合。
+func (manager *Manager) BeginRoomChange() bool {
+	manager.admission.Lock()
+	if !manager.available.Load() || manager.stopping {
+		manager.admission.Unlock()
+		return false
+	}
+	return true
+}
 
 var unavailableFrame = []byte(`{"version":1,"type":"LIKES_UNAVAILABLE","data":{}}`)
 
@@ -275,11 +304,30 @@ func (manager *Manager) BroadcastUnavailable() {
 }
 
 // SetAvailable 记录实时消费是否处于可运行状态。
-func (manager *Manager) SetAvailable(available bool) { manager.available.Store(available) }
+func (manager *Manager) SetAvailable(available bool) {
+	manager.available.Store(available)
+	if available {
+		manager.state.Store("READY")
+	} else {
+		manager.state.Store("RECOVERING")
+	}
+}
 
-// Health 检查 Redis、Kafka 及实时消费者状态，不代表 Worker 已落库。
-func (manager *Manager) Health(ctx context.Context) (bool, bool, bool) {
-	redisReady := manager.projection.Ping(ctx) == nil
-	kafkaReady := manager.producer.Ping(ctx) == nil
-	return redisReady, kafkaReady, manager.available.Load()
+func (manager *Manager) State() string { return manager.state.Load().(string) }
+
+func (manager *Manager) Available() bool { return manager.available.Load() }
+
+// Pause 先阻止新准入，再等待在途发布结束，最后摘除旧连接。
+func (manager *Manager) Pause(state string) {
+	manager.state.Store(state)
+	manager.available.Store(false)
+	manager.admission.Lock()
+	clients := manager.detachRooms(0)
+	manager.admission.Unlock()
+	closeClients(clients, "recovery")
+}
+
+func (manager *Manager) UseProjection(projection *likes.ProjectionRepository, initializer *likes.ProjectionInitializer) {
+	manager.current.Store(&projectionState{projection: projection, initializer: initializer, epoch: projection.Epoch()})
+	manager.Resume()
 }

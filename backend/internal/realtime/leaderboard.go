@@ -63,7 +63,8 @@ func (manager *Manager) readBoard(ctx context.Context, view *audience, roomID, s
 		cache.mu.Lock()
 	}
 	defer cache.mu.Unlock()
-	snap, err := manager.projection.ReadBoard(ctx, roomID, sessionID, userID, cache.revision)
+	current := manager.current.Load()
+	snap, err := current.projection.ReadBoard(ctx, roomID, sessionID, userID, cache.revision)
 	if err != nil {
 		return BoardResponse{}, err
 	}
@@ -75,7 +76,7 @@ func (manager *Manager) readBoard(ctx context.Context, view *audience, roomID, s
 		cache.revision, cache.rows = snap.Revision, rows
 	}
 	answer := BoardResponse{
-		RoomID: roomID, SessionID: sessionID, Epoch: manager.epoch,
+		RoomID: roomID, SessionID: sessionID, Epoch: current.epoch,
 		Revision: snap.Revision, LikesRevision: snap.LikesRevision,
 		Top: cache.rows, Me: BoardMe{Count: snap.Personal},
 	}
@@ -122,15 +123,21 @@ func (manager *Manager) resolveRows(ctx context.Context, ranked []likes.RankedUs
 
 // Leaderboard 供通过登录和场次校验的 HTTP 请求读取，个人数据只属于当前请求。
 func (manager *Manager) Leaderboard(ctx context.Context, roomID, sessionID, userID uint64) (BoardResponse, error) {
+	manager.admission.RLock()
+	defer manager.admission.RUnlock()
 	if !manager.available.Load() {
 		return BoardResponse{}, errors.New("实时点赞暂不可用")
 	}
-	if err := manager.initializer.EnsureSession(ctx, roomID, sessionID); err != nil {
+	if err := manager.current.Load().initializer.EnsureSession(ctx, roomID, sessionID); err != nil {
+		manager.SetAvailable(false)
 		return BoardResponse{}, err
 	}
 	view := manager.lookup(sessionID)
 	answer, err := manager.readBoard(ctx, view, strconv.FormatUint(roomID, 10), strconv.FormatUint(sessionID, 10), strconv.FormatUint(userID, 10))
 	if err != nil || view == nil {
+		if err != nil {
+			manager.SetAvailable(false)
+		}
 		return answer, err
 	}
 	version, err := strconv.ParseInt(answer.Revision, 10, 64)
@@ -216,7 +223,7 @@ func (manager *Manager) flushRoomLeaderboard(ctx context.Context, sessionID uint
 	sessionText := strconv.FormatUint(sessionID, 10)
 	for _, update := range personal {
 		frame, err := encodeFrame("MY_LIKES_UPDATE", map[string]string{
-			"session_id": sessionText, "projection_epoch": manager.epoch,
+			"session_id": sessionText, "projection_epoch": manager.current.Load().epoch,
 			"likes_revision": strconv.FormatInt(update.revision, 10), "count": update.count,
 		})
 		if err != nil {

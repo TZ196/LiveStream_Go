@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前要求应用数据库结构版本 5。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前要求应用数据库结构版本 6。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -105,7 +105,7 @@ go build ./cmd/api ./cmd/migrate
 
 ## 后续部署阶段
 
-P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；P5 扩展弹幕链路，P6 完善历史与恢复。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
+P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；P5 扩展弹幕链路，点赞已支持普通重启核验与异常重建，P6 继续完善历史与异常隔离。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
 
 P7 的 Compose 包含 API、Worker、MySQL、Redis、Kafka 五个服务。前端完成类型检查与构建后由 API 同源托管，Worker 镜像不包含前端；backend/Dockerfile 以仓库根目录为构建上下文。页面回退不能覆盖未知 `/api`、`/ws` 错误。公网 TLS、域名与生产运维不属于本阶段。
 
@@ -122,7 +122,7 @@ Kafka 需要分别公布宿主和容器客户端地址，并配置独立 Control
 
 ## 本地点赞链路启动（PowerShell）
 
-以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。已有点赞数据时先完成[停写和消费追平](#已有点赞数据升级到本场榜单)。从版本 4 升级须在旧进程退出后备份数据库，再执行迁移。保留 Kafka 位移和现有 Redis 投影。版本 5 可以读取既有单击事件，旧程序无法消费新批次。
+以下命令在仓库根目录执行。`.env` 为本地文件，不提交；先参考 `backend/configs/.env.example` 配置 MySQL 密码、JWT 密钥和点赞选项。`LIVESTREAM_PROJECTION_EPOCH` 须为固定的小写 UUID，首次生成后妥善保留，普通重启不得重新生成。版本 6 首次将该代次兼容写入 projection_state，成功重建后使用数据库的新代次，无需改写 .env。`LIVESTREAM_WS_ORIGIN` 必须与浏览器访问地址完全一致，例如 `http://127.0.0.1:5173`。已有点赞数据时先完成[停写和消费追平](#已有点赞数据升级到本场榜单)。从版本 4 升级须在旧进程退出后备份数据库，再执行迁移。保留 Kafka 位移和现有 Redis 投影。版本 5 可以读取既有单击事件，旧程序无法消费新批次。
 
 ```powershell
 docker compose --env-file .env -f deployments/docker/compose.yaml up -d
@@ -135,7 +135,7 @@ Set-Location backend
 go run ./cmd/migrate
 ```
 
-已有场次投影时先完成下文的排行榜补建。全新环境或补建完成后，在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 检查 API 及实时消费相关依赖，Worker 进度单独查看。
+已有场次投影时先完成下文的排行榜补建。全新环境或补建完成后，在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 只决定普通 API 就绪；响应 recovery 与房间 likes-state 接口独立报告点赞状态。Worker 进度单独查看。
 
 `LIVESTREAM_REALTIME_CONSUMERS` 控制 API 内的实时组成员数，`LIVESTREAM_PERSISTENCE_CONSUMERS` 控制 Worker 内的持久化组成员数。两项默认均为 4，可分别设置为 1–16。变更后重启对应进程，Kafka 自动重新分配原有分区。可以用 Broker 自带命令核对两个组的成员和分区分配。
 
@@ -143,7 +143,7 @@ go run ./cmd/migrate
 docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --describe --all-groups --members --verbose
 ```
 
-新场次首次进入时初始化空榜，显示本场 0 赞。历史投影缺失会报告不可用。Redis/Topic 身份或检查点不一致时服务会停止消费并要求恢复；完整自动投影重建尚未实现。单 Kafka Broker 与 Redis AOF everysec 均不提供零数据丢失保证。
+新场次首次进入时初始化空榜，显示本场 0 赞。正常 Redis 重启自动核验并沿用完整投影；丢失或回退时自动停止后端接收、等待 Worker 追平，再由 MySQL 明细与去重记录构建新代次。浏览器在原场次继续暂存，恢复后自动补发。必要日志缺失、明细冲突或 Topic 改变时保持 BLOCKED 并记录原因，修复后重启 API。当前只支持单 API 与独立 Worker，不提供恢复中断的断点续建。单 Kafka Broker 与 Redis AOF everysec 均不提供任何故障下零丢失保证。
 
 ## 已有点赞数据升级到本场榜单
 
@@ -155,7 +155,7 @@ docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/k
    docker compose --env-file .env -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --all-groups --describe
    ```
 
-2. 从数据库结构版本 4 升级时，先备份并在 `backend/` 执行 `go run ./cmd/migrate` 到版本 5。已经是版本 5 可以直接补榜。
+2. 从旧结构升级时，先停旧进程、备份并在 `backend/` 执行 `go run ./cmd/migrate` 到版本 6。版本 5 新增批次数，版本 6 仅保存有效代次。
 3. 在 `backend/` 使用新代码、原环境变量和数据库账号运行补建命令。
 
    ```sh
@@ -163,4 +163,4 @@ docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/k
    ```
 
    成功输出 `leaderboard_backfill_complete`。命令核对消费组成员、逐分区位移和投影身份，将 MySQL 唯一批次按用户求和，并与原场次总数核对后逐场切换。重复运行可得到相同累计数。若有积压，在保持入口停写的情况下使用原版本消费者追平，退出后重跑。Redis 身份、检查点或计数不一致时，保留现场并按[恢复设计](design/reliability.md)核对原因。
-4. 启动新版 API、Worker 和前端，确认 `/readyz` 可用。在原直播间核对本场总数、前 100 名和本人赞数，再恢复入口。已写入新榜后若需要恢复旧版消费，下一次启用榜单前需重新执行本节步骤。
+4. 启动新版 API、Worker 和前端，确认 `/readyz` 可用且点赞状态为 READY。在原直播间核对本场总数、前 100 名和本人赞数，再恢复入口。已写入新榜后若需要恢复旧版消费，下一次启用榜单前需重新执行本节步骤。

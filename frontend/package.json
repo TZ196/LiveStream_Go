@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "vite",
     "type-check": "vue-tsc --noEmit",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node --test tests/likes.test.cjs"
   },
   "dependencies": {
     "vue": "3.5.45"

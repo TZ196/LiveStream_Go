@@ -27,6 +27,11 @@ func (s *Server) EnableRealtime(manager *realtime.Manager, origin string) {
 
 // issueWSTicket 为已认证用户签发绑定房间、场次和来源的短期票据。
 func (s *Server) issueWSTicket(ctx context.Context, c *app.RequestContext) {
+	if s.realtime.State() != "READY" {
+		c.Header("Retry-After", "2")
+		writeAPIError(c, 503, "LIKES_UNAVAILABLE", "点赞服务正在恢复，点击可暂存在当前页面", true)
+		return
+	}
 	identity, ok := roomIdentity(c)
 	if !ok {
 		return
@@ -55,6 +60,33 @@ func (s *Server) issueWSTicket(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	writeData(c, 201, map[string]any{"ticket": encoded, "expires_at": expires.UTC().Format(time.RFC3339Nano), "ws_path": fmt.Sprintf("/ws/rooms/%d?ticket=%s", roomID, encoded), "session_id": fmt.Sprint(session.ID)})
+}
+
+// likesState 只读 MySQL 确认场次，Redis 不可用时首次进入的页面也能暂存点击。
+func (s *Server) likesState(ctx context.Context, c *app.RequestContext) {
+	roomID, ok := readRoomID(c)
+	if !ok {
+		return
+	}
+	value, err := s.rooms.Get(ctx, roomID)
+	if err != nil {
+		s.roomError(ctx, c, err)
+		return
+	}
+	state := "BLOCKED"
+	if s.realtime != nil {
+		state = s.realtime.State()
+	}
+	var sessionID any
+	if value.Status == room.Open {
+		session, err := s.rooms.ActiveSession(ctx, roomID)
+		if err != nil {
+			s.roomError(ctx, c, err)
+			return
+		}
+		sessionID = strconv.FormatUint(session.ID, 10)
+	}
+	writeData(c, 200, map[string]any{"state": state, "session_id": sessionID, "room_status": value.Status})
 }
 
 // likeLeaderboard 验证当前房间与场次，仅使用登录身份查询个人部分。

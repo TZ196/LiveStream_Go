@@ -126,14 +126,11 @@ RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like
 
 GET /healthz 返回 200、JSON 响应 {"status":"ok"} 和 Cache-Control: no-store，仅检查进程能否响应，不访问中间件。不支持的方法返回 405。
 
-GET /readyz 返回 JSON 和 Cache-Control: no-store。未启用点赞时为 P2；启用点赞时 stage 为 P4-likes，dependencies 除 mysql 外检查 redis、kafka 和 realtime_consumer，任一不可用返回 503。该探针不检查独立 Worker，不能证明消息已落库。下表保留 P2 模式说明：
+GET /readyz 返回 JSON 和 Cache-Control: no-store。status 按 HTTP 生命周期、MySQL 连接与结构检查判定 ready/200 或 starting、not_ready、stopping/503。dependencies 只包含 mysql；stage 在启用点赞时为 P4-likes；recovery 独立报告 CHECKING、READY、RECOVERING、BLOCKED，未启用为 not_applicable。点赞故障不改变普通 API 的状态码。此接口不检查独立 Worker，Worker 状态通过其 RUNNING/PAUSED 日志、消费组和数据库检查点核对。
 
-| 字段 | 当前含义 |
-| --- | --- |
-| status | starting、ready、not_ready 或 stopping；仅 ready 返回 200，其余返回 503 |
-| stage | 固定为 P2，表示房间管理阶段，不代表实时连接或点赞已完成 |
-| dependencies | 仅包含 mysql：未检查为 not_checked，查询和版本检查通过为 ready，失败为 unavailable；不包含未接入的 Redis、Kafka |
-| recovery | not_applicable；本阶段没有投影恢复链路 |
+GET /api/v1/rooms/{id}/likes-state 要求 Bearer，沿用普通响应外壳，返回 data={state,session_id,room_status}。state 为上述四种点赞状态；开放房间的 session_id 为十进制字符串，关闭时为 null。此接口只依赖 MySQL，可用于恢复期间首次取得场次并暂存点击；未启用点赞时 state 为 BLOCKED。该接口不向页面泄露原始错误、地址和凭据。
+
+点赞非 READY 时 ws-ticket 返回 503/LIKES_UNAVAILABLE，可重试；WebSocket 新握手拒绝。恢复期间房间创建、关闭、重开返回 503/LIKES_UNAVAILABLE，以保持恢复时场次集合稳定。登录、注册和房间读取按自身依赖正常服务。
 
 API 在监听前检查 MySQL 连接、迁移版本和所需列，失败直接退出，因此初始化失败通常表现为连接不上 API。运行期间，每次就绪请求在 1 秒预算内重新执行只读检查；失败返回 not_ready/503，数据库恢复并通过检查后可重新返回 ready/200。检查不读取账号记录，也不证明所有索引、约束或业务功能均正确。
 

@@ -8,7 +8,7 @@ import LikeLeaderboard from '../components/LikeLeaderboard.vue'
 const props = defineProps<{ token: string; userId: string; roomId: string }>()
 const emit = defineEmits<{ back: []; expired: [] }>()
 const room = ref<Room>()
-const { board, connected: likeConnected, likeCount, pendingCount, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
+const { board, canCollect, likeCount, queuedClicks, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
 const { rows, mine, onBoard, status: boardStatus } = board
 const feedback = ref<HTMLSpanElement>()
 let pulse: Animation | undefined
@@ -107,11 +107,11 @@ onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopLikes() })
       </dl>
       <p class="account-notice">{{ room.status === 'CLOSED' ? '本次直播已结束，房主可以在这个房间重新开播。' : '房间已开放，欢迎点赞。' }}</p>
       <div v-if="room.status === 'OPEN'" class="room-actions">
-        <button class="retry-button like-button" type="button" :disabled="!likeConnected || full" @click="clickLike">
+        <button class="retry-button like-button" type="button" :disabled="!canCollect || full" @click="clickLike">
           点赞<span ref="feedback" class="like-feedback" aria-hidden="true">+1</span>
         </button>
         <span>本场点赞：{{ likeCount ?? '暂不可用' }}</span>
-        <span v-if="pendingCount">待确认批次：{{ pendingCount }}</span>
+        <span v-if="queuedClicks !== '0'">待发送或确认：{{ queuedClicks }} 赞</span>
       </div>
       <p v-if="likeNotice" role="status">{{ likeNotice }}</p>
       <LikeLeaderboard v-if="room.status === 'OPEN'" :rows="rows" :mine="mine" :on-board="onBoard" :status="boardStatus" :user-id="userId" />

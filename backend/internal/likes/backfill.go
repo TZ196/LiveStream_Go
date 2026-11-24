@@ -10,55 +10,25 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"github.com/twmb/franz-go/pkg/kerr"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // 维护窗口内先核对两个组均已退出，而且每一分区已处理至日志末端。
 func drainedOffsets(ctx context.Context, c *Consumer) (map[int32]int64, error) {
-	describe := kmsg.NewPtrDescribeGroupsRequest()
-	describe.Groups = []string{c.group}
-	group, err := describe.RequestWith(ctx, c.client)
-	if err != nil {
+	if err := c.requireInactive(ctx); err != nil {
 		return nil, err
-	}
-	if len(group.Groups) != 1 {
-		return nil, errors.New("无法核对消费组成员")
-	}
-	info := group.Groups[0]
-	if err := kerr.ErrorForCode(info.ErrorCode); err != nil && !errors.Is(err, kerr.GroupIDNotFound) {
-		return nil, err
-	}
-	if len(info.Members) > 0 {
-		return nil, fmt.Errorf("请先停止 %s 的所有成员", c.group)
 	}
 	committed, err := c.CommittedOffsets(ctx)
 	if err != nil {
 		return nil, err
 	}
-	request := kmsg.NewPtrListOffsetsRequest()
-	topic := kmsg.ListOffsetsRequestTopic{Topic: "live.events"}
-	for _, id := range c.partitions {
-		part := kmsg.NewListOffsetsRequestTopicPartition()
-		part.Partition = id
-		part.Timestamp = -1
-		topic.Partitions = append(topic.Partitions, part)
-	}
-	request.Topics = []kmsg.ListOffsetsRequestTopic{topic}
-	end, err := request.RequestWith(ctx, c.client)
+	ends, err := c.logOffsets(ctx, -1)
 	if err != nil {
 		return nil, err
 	}
-	if len(end.Topics) != 1 || len(end.Topics[0].Partitions) != len(committed) {
-		return nil, errors.New("日志末端不完整")
-	}
-	for _, part := range end.Topics[0].Partitions {
-		if err := kerr.ErrorForCode(part.ErrorCode); err != nil {
-			return nil, err
-		}
-		pos, exists := committed[part.Partition]
-		if !exists || (pos != part.Offset && !(pos == -1 && part.Offset == 0)) {
-			return nil, fmt.Errorf("%s 分区 %d 尚未追平，提交 %d，末端 %d", c.group, part.Partition, pos, part.Offset)
+	for partition, end := range ends {
+		pos, exists := committed[partition]
+		if !exists || (pos != end && !(pos == -1 && end == 0)) {
+			return nil, fmt.Errorf("%s 分区 %d 尚未追平，提交 %d，末端 %d", c.group, partition, pos, end)
 		}
 	}
 	return committed, nil
@@ -78,6 +48,18 @@ func (initializer *ProjectionInitializer) BackfillLeaderboards(ctx context.Conte
 	defer worker.Close()
 	if rt.TopicID() != worker.TopicID() {
 		return errors.New("消费组 Topic 身份不一致")
+	}
+	// 维护命令也读取成功启用的代次，恢复后不再使用旧的配置代次补榜。
+	epoch, err := NewPersistenceRepository(initializer.db).ProjectionEpoch(ctx, initializer.projection.epoch, rt.TopicID())
+	if err != nil {
+		return err
+	}
+	if epoch != initializer.projection.epoch {
+		projection, err := NewProjectionRepository(initializer.projection.client, epoch)
+		if err != nil {
+			return err
+		}
+		initializer = NewProjectionInitializer(initializer.db, projection)
 	}
 	checkBarrier := func() (map[int32]int64, error) {
 		offsets, err := drainedOffsets(ctx, rt)
