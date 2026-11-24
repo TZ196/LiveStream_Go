@@ -3,7 +3,6 @@ package likes
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -334,5 +333,5 @@ func TestRecoveryIntegration(t *testing.T) {
 			t.Fatalf("日志缺口没有阻止恢复: %v", err)
 		}
 	})
-	t.Log(fmt.Sprintf("normal restart, ahead replay, missing marker, Worker backlog, rebuild, zero session, retry, conflict and missing-log checks completed; epoch=%s", projection.epoch))
+	t.Logf("normal restart, ahead replay, missing marker, Worker backlog, rebuild, zero session, retry, conflict and missing-log checks completed; epoch=%s", projection.epoch)
 }
