@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // 每个 API 实例有自己的注册表。标签只用固定结果，避免按用户、连接或场次创建时间序列。
@@ -106,12 +106,12 @@ func (m *Manager) MetricsHandler() http.Handler {
 }
 
 // ObserveProjection 使用 Kafka 记录的生产者时间。业务事件中的 UUIDv7 时间来自浏览器。
-func (m *Manager) ObserveProjection(record *kgo.Record, duplicate bool, err error, at time.Time) {
+func (m *Manager) ObserveProjection(record likes.ConsumedLike, duplicate bool, err error, at time.Time) {
 	if err != nil {
 		m.metrics.projectionErrors.WithLabelValues("redis_error").Inc()
 		return
 	}
-	if record.Attrs.TimestampType() != 0 || record.Timestamp.IsZero() || at.Before(record.Timestamp) {
+	if !record.HasProducerTime || record.ProducedAt.IsZero() || at.Before(record.ProducedAt) {
 		m.metrics.projectionErrors.WithLabelValues("producer_clock").Inc()
 		return
 	}
@@ -119,5 +119,5 @@ func (m *Manager) ObserveProjection(record *kgo.Record, duplicate bool, err erro
 	if duplicate {
 		result = "duplicate"
 	}
-	m.metrics.projection.WithLabelValues(result).Observe(at.Sub(record.Timestamp).Seconds())
+	m.metrics.projection.WithLabelValues(result).Observe(at.Sub(record.ProducedAt).Seconds())
 }

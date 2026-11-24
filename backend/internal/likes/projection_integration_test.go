@@ -1,4 +1,4 @@
-package messaging
+package likes
 
 import (
 	"context"
@@ -37,7 +37,11 @@ func TestProjectionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := &kgo.Record{Topic: "live.events", Key: key, Value: value, Partition: 0, Offset: 0}
+	raw := &kgo.Record{Topic: "live.events", Key: key, Value: value, Partition: 0, Offset: 0}
+	record, err := DecodeLikeRecord(raw, "test-topic")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := repo.ApplyLike(ctx, record); err == nil {
 		t.Fatal("未初始化的投影应拒绝")
 	}
@@ -48,7 +52,7 @@ func TestProjectionIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record.Offset = 1
+	record.NextOffset = 2
 	second, err := repo.ApplyLike(ctx, record)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +60,7 @@ func TestProjectionIntegration(t *testing.T) {
 	if first.Count != "1" || first.Duplicate || second.Count != "1" || !second.Duplicate {
 		t.Fatalf("重复处理结果不正确: %+v %+v", first, second)
 	}
-	record.Offset = 0
+	record.NextOffset = 1
 	if _, err := repo.ApplyLike(ctx, record); err != nil {
 		t.Fatal(err)
 	}
@@ -71,11 +75,15 @@ func TestProjectionIntegration(t *testing.T) {
 	if err := repo.InitializeNewSession(ctx, "2", "4"); err != nil {
 		t.Fatal(err)
 	}
-	record.Key, record.Value, err = conflict.KafkaRecord()
+	raw.Key, raw.Value, err = conflict.KafkaRecord()
 	if err != nil {
 		t.Fatal(err)
 	}
-	record.Offset = 2
+	raw.Offset = 2
+	record, err = DecodeLikeRecord(raw, "test-topic")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := repo.ApplyLike(ctx, record); err == nil {
 		t.Fatal("不同内容使用同一 event_id 应被拒绝")
 	}

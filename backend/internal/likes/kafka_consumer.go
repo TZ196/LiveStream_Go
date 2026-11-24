@@ -1,4 +1,4 @@
-package messaging
+package likes
 
 import (
 	"context"
@@ -68,7 +68,7 @@ func (consumer *Consumer) TopicID() string { return consumer.topicID }
 
 // Run 在处理成功后同步提交位移；失败时停止，避免越过未处理的记录。
 // 调用方必须核对已存在投影与提交位移，并协调进程重启和恢复。
-func (consumer *Consumer) Run(ctx context.Context, process func(context.Context, *kgo.Record, string) error) error {
+func (consumer *Consumer) Run(ctx context.Context, process func(context.Context, ConsumedLike) error) error {
 	if process == nil {
 		return errors.New("缺少消费处理函数")
 	}
@@ -90,7 +90,13 @@ func (consumer *Consumer) Run(ctx context.Context, process func(context.Context,
 			// 停止拉取后，已取出的记录仍有独立期限完成业务写入和 offset 提交。
 			recordCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer done()
-			if err := process(recordCtx, record, consumer.topicID); err != nil {
+			// 每组每条记录在入口校验一次，仓储和内存分发都使用同一份事件。
+			decoded, err := DecodeLikeRecord(record, consumer.topicID)
+			if err != nil {
+				processingErr = err
+				return
+			}
+			if err := process(recordCtx, decoded); err != nil {
 				processingErr = err
 				return
 			}

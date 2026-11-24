@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 )
 
 // 每个有观众的场次拥有独立状态。roomID 不变，closed 关闭后不再复用。
@@ -41,7 +41,7 @@ type likeUpdate struct {
 }
 
 // QueueLikeUpdate 使用 Redis 此刻的权威结果补齐内存；重放也能完成上次中断的同步。
-func (manager *Manager) QueueLikeUpdate(ctx context.Context, event messaging.LikeEvent, projection messaging.ProjectedLike) error {
+func (manager *Manager) QueueLikeUpdate(ctx context.Context, event likes.LikeEvent, projection likes.ProjectedLike) error {
 	redisAt := time.Now()
 	sessionID, err := strconv.ParseUint(event.SessionID, 10, 64)
 	if err != nil {

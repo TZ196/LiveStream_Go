@@ -11,7 +11,7 @@ import (
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
-	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -30,11 +30,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	likes, err := config.LoadLikes()
+	likesConfig, err := config.LoadLikes()
 	if err != nil {
 		return err
 	}
-	if !likes.Enabled {
+	if !likesConfig.Enabled {
 		return errors.New("请配置并启用点赞链路")
 	}
 	db, err := database.Open(ctx, cfg)
@@ -45,11 +45,11 @@ func run(ctx context.Context) error {
 	if err = database.CheckSchema(ctx, db); err != nil {
 		return err
 	}
-	client := redis.NewClient(&redis.Options{Addr: likes.RedisAddr})
+	client := redis.NewClient(&redis.Options{Addr: likesConfig.RedisAddr})
 	defer client.Close()
-	repo, err := messaging.NewProjectionRepository(client, likes.ProjectionEpoch)
+	repo, err := likes.NewProjectionRepository(client, likesConfig.ProjectionEpoch)
 	if err != nil {
 		return err
 	}
-	return messaging.NewProjectionInitializer(db, repo).BackfillLeaderboards(ctx, likes.Brokers)
+	return likes.NewProjectionInitializer(db, repo).BackfillLeaderboards(ctx, likesConfig.Brokers)
 }

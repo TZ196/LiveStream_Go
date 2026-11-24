@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 )
 
 // TestLikeReplayAfterLockTimeout 覆盖 Redis 已计数但内存同步超时后的重复投递。
@@ -15,8 +15,8 @@ func TestLikeReplayAfterLockTimeout(t *testing.T) {
 	manager.SetAvailable(true)
 	client := manager.newConnection(nil)
 	view := manager.register(1, 2, "3", client)
-	event := messaging.LikeEvent{RoomID: "1", SessionID: "2", UserID: "3"}
-	result := messaging.ProjectedLike{Count: "5", Revision: "5", Personal: "5", BoardRevision: "5"}
+	event := likes.LikeEvent{RoomID: "1", SessionID: "2", UserID: "3"}
+	result := likes.ProjectedLike{Count: "5", Revision: "5", Personal: "5", BoardRevision: "5"}
 	view.mu.Lock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	err := manager.QueueLikeUpdate(ctx, event, result)
