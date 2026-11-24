@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
 	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
@@ -34,7 +33,7 @@ type Server struct {
 	db       *gorm.DB
 	users    *user.Service
 	rooms    *room.Service
-	tokens   *auth.Tokens
+	tokens   *user.Tokens
 	realtime *realtime.Manager
 	wsOrigin string
 	limit    *authLimiter
@@ -43,7 +42,7 @@ type Server struct {
 }
 
 // New 使用已校验的配置组装 HTTP 服务；开始监听由入口调用 Spin 完成。
-func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Service, rooms *room.Service, tokens *auth.Tokens) *Server {
+func New(cfg config.Config, logger *slog.Logger, db *gorm.DB, users *user.Service, rooms *room.Service, tokens *user.Tokens) *Server {
 	hertzServer := server.New(
 		server.WithHostPorts(cfg.HTTPAddr),
 		// 标准网络实现会返回监听错误，使端口冲突能由入口统一处理。
