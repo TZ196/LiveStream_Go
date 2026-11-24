@@ -1,6 +1,6 @@
 # LiveStream 当前状态
 
-更新于 2026 年 11 月 23 日。当前点赞链路支持批量发送、同场总数、前 100 名与榜外个人数，以及两个独立消费组，数据库结构版本为 5。[本地运行说明](deployment.md)
+更新于 2026 年 11 月 24 日。当前点赞链路支持批量发送、同场总数、前 100 名与榜外个人数，以及两个独立消费组，数据库结构版本为 5。[本地运行说明](deployment.md)
 
 ## 已完成与未完成
 
@@ -16,6 +16,8 @@
 ## 验证与环境
 
 此前的环境及功能验证见 [P1a](verification/reports/p1a.md)、[P1b](verification/reports/p1b.md)、[P2](verification/reports/p2.md) 和[初版点赞链路](verification/reports/likes-chain.md)。
+
+后端精简重构分支将内部包从 9 个归拢为 8 个，非测试 Go 文件从 48 个归拢为 44 个。源码入口见 [Backend 结构](../backend/ARCHITECTURE.md)，基线、真实中间件、WebSocket 和并发检查见[本轮验证](verification/reports/backend-refactor.md)。
 
 ## 待解决问题
 

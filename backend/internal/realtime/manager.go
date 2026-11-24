@@ -120,6 +120,14 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		// 暂停后才加入的连接可能错过了该场已发送的暂停通知。
 		manager.sendRoomFrame(view, []*connection{client}, &outbound{payload: unavailableFrame}, false)
 	}
+	manager.readMessages(client, proof)
+}
+
+// readMessages 在握手和首屏写协程建立后运行，负责单连接读帧、准入和接受确认。
+func (manager *Manager) readMessages(client *connection, proof ticket) {
+	socket := client.socket
+	roomID := proof.roomID
+	roomText := strconv.FormatUint(roomID, 10)
 	socket.SetReadLimit(8 * 1024)
 	deadline := func() time.Time {
 		next := time.Now().Add(60 * time.Second)
@@ -129,8 +137,9 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return next
 	}
 	_ = socket.SetReadDeadline(deadline())
+	// Gorilla 在读循环收到控制 Pong 时刷新读期限，期限同时受登录到期约束。
 	socket.SetPongHandler(func(string) error { return socket.SetReadDeadline(deadline()) })
-	sessionText := strconv.FormatUint(session.ID, 10)
+	sessionText := strconv.FormatUint(proof.sessionID, 10)
 	var lastPing time.Time
 	for {
 		kind, payload, err := socket.ReadMessage()
@@ -171,7 +180,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		manager.admission.RLock()
 		active, err := manager.rooms.ActiveSession(context.Background(), roomID)
 		manager.admission.RUnlock()
-		if err != nil || active.ID != session.ID {
+		if err != nil || active.ID != proof.sessionID {
 			return
 		}
 		event, err := likes.NewLikeBatch(strconv.FormatUint(proof.identity.UserID, 10), roomText, input.SessionID, input.RequestID, count, time.Now())

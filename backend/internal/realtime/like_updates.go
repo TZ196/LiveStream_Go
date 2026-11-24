@@ -4,33 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 )
-
-// 每个有观众的场次拥有独立状态。roomID 不变，closed 关闭后不再复用。
-// 其余状态由 mu 保护，公开榜单的查询缓存另外由 board.mu 保护。
-type audience struct {
-	mu       roomMutex
-	closed   atomic.Bool
-	roomID   uint64
-	clients  map[*connection]struct{}
-	revision int64
-	pending  *likeUpdate
-	// 抓取指标时只读这三个时间点，即使场次锁被长时间持有也能观察到积压。
-	pendingSince  atomic.Pointer[time.Time]
-	sendingSince  atomic.Pointer[time.Time]
-	boardSince    atomic.Pointer[time.Time]
-	pauseNotified bool
-	people        map[string]*personalUpdate
-	dirtyPeople   map[string]*personalUpdate
-	board         publicBoard
-	wantedBoard   int64
-	sentBoard     int64
-	lastTop       []BoardRow
-}
 
 type likeUpdate struct {
 	RoomID    string `json:"room_id"`
