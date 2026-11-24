@@ -10,7 +10,7 @@
 
 除注册、登录、健康、就绪和运行指标接口外，请求携带 Authorization: Bearer 访问令牌。Content-Type 不匹配返回 415，格式错误返回 400，权限不足不能通过客户端传递用户 ID 绕过。
 
-启用实时点赞后，API 的 `GET /metrics` 提供 Prometheus 抓取接口。时间序列按实例和固定结果聚合，房间、场次、用户与连接 ID 不作为标签。生产反向代理仅向监控网开放此路径。指标口径见[验证设计](../verification/plan.md#实时点赞运行指标)。
+启用任一实时业务后，API 的 `GET /metrics` 提供 Prometheus 抓取接口。时间序列按实例和固定结果聚合，房间、场次、用户与连接 ID 不作为标签。生产反向代理仅向监控网开放此路径。指标口径见[验证设计](../verification/plan.md#实时点赞运行指标)。
 
 ## 认证和凭据
 
@@ -46,10 +46,10 @@
 | POST /api/v1/rooms/{id}/reopen | 空 JSON 对象 | Room，200 | 仅房主；原房间恢复 OPEN，closed_at=null；已 OPEN 时返回当前房间 |
 | POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path、session_id，201 | 仅开放房间；规则见下文 |
 | GET /api/v1/rooms/{id}/sessions/{session_id}/like-leaderboard | Bearer，无查询参数 | 本场榜单与本人累计数，200 | 登录用户可读，首次进入与补取共用 |
-| GET /api/v1/rooms/{id}/danmaku | limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | P6 起；已落库数据按 id 倒序 |
+| GET /api/v1/rooms/{id}/danmaku | 可选 session_id、limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | 已实现；已落库数据按 id 倒序，开放或关闭房间均可查询 |
 | GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
 
-User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照，created_at 是客户端 request_id 提供并经窗口校验的事件时间，不是可信的服务端接收时间。
+User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、request_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照，created_at 是客户端 request_id 提供并经窗口校验的事件时间，不是可信的服务端接收时间。
 
 创建房间未提供 HTTP 幂等键，前端禁止重复点击和自动重发。结果未知时先刷新本人房间列表进行确认，不能将网络超时直接解释为创建失败。弹幕与点赞的幂等协议仅适用于 WebSocket 业务请求。
 
@@ -101,7 +101,7 @@ RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like
 
 默认 limit=20，允许 1 至 100；超过范围返回 INVALID_ARGUMENT。cursor 为服务端生成的不透明 base64url 字符串，包含上页末尾 id 及绑定的过滤条件；解码后逐项校验，不直接拼接 SQL。筛选条件改变时旧游标返回 INVALID_CURSOR。
 
-弹幕以数据库 id 作为稳定分页位置，表示持久化顺序，不能据此推断跨客户端发送的绝对先后。next_cursor 无下一页时为 null，空页为 items=[]。实时流与历史页通过 event_id 合并。
+弹幕可按 session_id 筛选；该场次必须属于路径房间，否则返回 404。未指定时查询该房间所有场次。重复、未知或显式为空的查询参数返回 400。游标绑定 room_id 与 session_id；更改筛选需重新开始分页。弹幕以数据库自增 id 作为稳定分页位置，表示数据库插入分配顺序，不等同于严格提交顺序或 Kafka 发送顺序，不能据此推断跨客户端发送的绝对先后。next_cursor 无下一页时为 null，空页为 items=[]。实时流与历史页通过 event_id 合并。
 
 ## HTTP 错误
 
@@ -118,19 +118,19 @@ RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like
 | 501 | CAPABILITY_NOT_ENABLED | 当前阶段尚未交付该能力 |
 | 500 | INTERNAL_ERROR | 保留 trace_id，不返回内部堆栈 |
 
-当前已实现创建、列表、详情、关闭、重新开播和房间票据接口，均要求 Bearer 认证；统计和历史接口仍未实现。
+当前已实现创建、列表、详情、关闭、重新开播、房间票据、点赞状态/榜单和弹幕历史，均要求 Bearer 认证；stats 统计接口仍未实现。
 
-数据库、Redis 故障不得返回 200 加伪造成功值。历史功能在 P6 之前明确返回 CAPABILITY_NOT_ENABLED。握手票据错误对应的握手响应见 WebSocket 协议。
+数据库、Redis 故障不得返回 200 加伪造成功值。弹幕历史在启用弹幕子系统时注册，词库错误不关闭历史查询。握手票据错误对应的握手响应见 WebSocket 协议。
 
 ## 运维接口
 
 GET /healthz 返回 200、JSON 响应 {"status":"ok"} 和 Cache-Control: no-store，仅检查进程能否响应，不访问中间件。不支持的方法返回 405。
 
-GET /readyz 返回 JSON 和 Cache-Control: no-store。status 按 HTTP 生命周期、MySQL 连接与结构检查判定 ready/200 或 starting、not_ready、stopping/503。dependencies 只包含 mysql；stage 在启用点赞时为 P4-likes；recovery 独立报告 CHECKING、READY、RECOVERING、BLOCKED，未启用为 not_applicable。点赞故障不改变普通 API 的状态码。此接口不检查独立 Worker，Worker 状态通过其 RUNNING/PAUSED 日志、消费组和数据库检查点核对。
+GET /readyz 返回 JSON 和 Cache-Control: no-store。status 按 HTTP 生命周期、MySQL 连接与结构检查判定 ready/200 或 starting、not_ready、stopping/503。dependencies 只包含 mysql；stage 当前保留 P4-likes 兼容值（启用共享实时路由时）；recovery 独立报告点赞 CHECKING、READY、RECOVERING、BLOCKED，无实时路由时为 not_applicable。danmaku 独立报告 READY、UNAVAILABLE 或 DISABLED。业务不可用不改变普通 API 的状态码。此接口不检查独立 Worker；Worker 状态通过其日志、独立 /metrics、消费组和数据库检查点核对。
 
 GET /api/v1/rooms/{id}/likes-state 要求 Bearer，沿用普通响应外壳，返回 data={state,session_id,room_status}。state 为上述四种点赞状态；开放房间的 session_id 为十进制字符串，关闭时为 null。此接口只依赖 MySQL，可用于恢复期间首次取得场次并暂存点击；未启用点赞时 state 为 BLOCKED。该接口不向页面泄露原始错误、地址和凭据。
 
-点赞非 READY 时 ws-ticket 返回 503/LIKES_UNAVAILABLE，可重试；WebSocket 新握手拒绝。恢复期间房间创建、关闭、重开返回 503/LIKES_UNAVAILABLE，以保持恢复时场次集合稳定。登录、注册和房间读取按自身依赖正常服务。
+ws-ticket 与 WebSocket 握手不依赖点赞 READY；恢复期间可建立共享连接，首屏分别报告业务能力与未知计数。启用点赞且恢复期间，房间创建、关闭、重开仍返回 503/LIKES_UNAVAILABLE，以保持点赞重建时场次集合稳定。登录、注册和房间读取按自身依赖正常服务。
 
 API 在监听前检查 MySQL 连接、迁移版本和所需列，失败直接退出，因此初始化失败通常表现为连接不上 API。运行期间，每次就绪请求在 1 秒预算内重新执行只读检查；失败返回 not_ready/503，数据库恢复并通过检查后可重新返回 ready/200。检查不读取账号记录，也不证明所有索引、约束或业务功能均正确。
 
