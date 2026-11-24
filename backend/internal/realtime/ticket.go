@@ -8,12 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
+	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 )
 
 // ticket 绑定认证身份和唯一场次，原始票据不会被保存。
 type ticket struct {
-	identity  auth.Identity
+	identity  user.Identity
 	roomID    uint64
 	sessionID uint64
 	origin    string
@@ -30,7 +30,7 @@ type Tickets struct {
 func NewTickets() *Tickets { return &Tickets{items: make(map[[32]byte]ticket)} }
 
 // Issue 生成 30 秒有效的一次性票据，并绑定来源和身份有效期。
-func (tickets *Tickets) Issue(identity auth.Identity, roomID, sessionID uint64, origin string) (string, time.Time, error) {
+func (tickets *Tickets) Issue(identity user.Identity, roomID, sessionID uint64, origin string) (string, time.Time, error) {
 	now := time.Now()
 	if identity.UserID == 0 || roomID == 0 || sessionID == 0 || origin == "" || !identity.ExpiresAt.After(now) {
 		return "", time.Time{}, errors.New("票据绑定信息无效")

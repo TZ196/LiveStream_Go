@@ -11,7 +11,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/cloudwego/hertz/pkg/app"
 )
@@ -97,7 +96,7 @@ func (s *Server) login(ctx context.Context, c *app.RequestContext) {
 		TokenType   string       `json:"token_type"`
 		ExpiresIn   int          `json:"expires_in"`
 		User        userResponse `json:"user"`
-	}{encoded, "Bearer", int(auth.Lifetime.Seconds()), publicUser(account)}
+	}{encoded, "Bearer", int(user.Lifetime.Seconds()), publicUser(account)}
 	writeData(c, 200, response)
 }
 
@@ -115,7 +114,7 @@ func (s *Server) authenticate(ctx context.Context, c *app.RequestContext) {
 	identity, err := s.tokens.Parse(encoded)
 	if err != nil {
 		code := "UNAUTHORIZED"
-		if errors.Is(err, auth.ErrTokenExpired) {
+		if errors.Is(err, user.ErrTokenExpired) {
 			code = "TOKEN_EXPIRED"
 		}
 		writeAPIError(c, 401, code, err.Error(), false)
@@ -131,7 +130,7 @@ func (s *Server) currentUser(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	value, _ := c.Get("identity")
-	identity, ok := value.(auth.Identity)
+	identity, ok := value.(user.Identity)
 	if !ok {
 		writeAPIError(c, 401, "UNAUTHORIZED", "请先登录", false)
 		return

@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
 	"github.com/TZ196/LiveStream_Go/backend/internal/httpserver"
@@ -80,7 +79,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return errors.Join(err, database.Close(db))
 	}
-	tokens := auth.NewTokens(cfg.JWTSecret)
+	tokens := user.NewTokens(cfg.JWTSecret)
 	roomRepository := room.NewRepository(db)
 	roomService := room.NewService(roomRepository)
 	apiServer := httpserver.New(cfg, logger, db, userService, roomService, tokens)

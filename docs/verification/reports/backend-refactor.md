@@ -4,7 +4,7 @@
 
 ## 环境与证据
 
-WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启。使用本轮新建的 `ls-refactor-mysql`、`ls-refactor-redis`、`ls-refactor-kafka`，版本分别为 MySQL 8.4.13、Redis 7.4.7、Kafka 4.0.0。回环端口分别为 23306、26379、29092，API 为 28080。Topic 为独立的 `live.events`，16 分区、单副本，两组默认各 4 个成员。
+WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启，宿主 CPU 为 i7-13620H，WSL 可见 16 个逻辑 CPU、7.6 GiB 内存。使用本轮新建的 `ls-refactor-mysql`、`ls-refactor-redis`、`ls-refactor-kafka`，版本分别为 MySQL 8.4.13、Redis 7.4.7、Kafka 4.0.0。回环端口分别为 23306、26379、29092，API 为 28080。Topic 为独立的 `live.events`，16 分区、单副本，两组默认各 4 个成员。
 
 测试凭据随机生成并只放在本机临时目录。原始日志、运行环境和测试用的进程管理脚本位于 `/tmp/livestream-refactor-mxy426cz/`。临时目录的保留时间取决于本机清理策略，下表记录本轮实际结果。
 
@@ -33,6 +33,8 @@ WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启。使用本轮新建的 `ls-r
 ## 复现入口
 
 点赞包阶段的 `go vet ./...`、普通测试和四命令构建通过。隔离环境执行 `go test -count=1 -v ./...` 及 `go test -race -count=1 -v ./...`，两轮各有 12 项通过，包含 6 项中间件用例，真实 API 用例留给整体运行单独执行。新增坏记录入口用例证实业务回调未触发且 Kafka 位移未提交；事务中插入不存在场次的事件时，inbox 和检查点一起回滚。日志为 `likes-tests-raw.log`、`likes-race-raw.log`。
+
+身份与基础文件阶段通过格式、vet、普通测试、race 单元回归和四命令构建。JWT 实现与基线逐字节比较，仅包声明改变。独立 `refactor_empty` 空库实际迁移 1→5，重复迁移成功；将该隔离库的 users 表改名后，API 在监听前以退出码 1 拒绝并报告结构缺失。实际 API/Worker 复跑完整点赞入口用例通过，结果仍为 101 条事件、305 次点击，证据为 `user-api-tests.log`、`user-migrate-0.log`、`user-migrate-1.log`、`user-schema-rejection.log`。API/Worker SIGTERM 退出通过。
 
 在 `backend/` 执行格式检查、`go vet ./...`、`go test -count=1 -v ./...`、`go test -race -count=1 ./...`、`go build ./cmd/...`。中间件用例读取 `LIVESTREAM_TEST_KAFKA`、`LIVESTREAM_TEST_REDIS`、`LIVESTREAM_TEST_MYSQL_DSN`。
 

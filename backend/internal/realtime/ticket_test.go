@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
+	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 )
 
 // TestTicketSingleUse 验证同一票据并发使用时只有一个连接能消费成功。
 func TestTicketSingleUse(t *testing.T) {
 	tickets := NewTickets()
-	encoded, _, err := tickets.Issue(auth.Identity{UserID: 1, ExpiresAt: time.Now().Add(time.Minute)}, 2, 3, "http://localhost:5173")
+	encoded, _, err := tickets.Issue(user.Identity{UserID: 1, ExpiresAt: time.Now().Add(time.Minute)}, 2, 3, "http://localhost:5173")
 	if err != nil {
 		t.Fatal(err)
 	}

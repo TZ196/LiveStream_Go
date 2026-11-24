@@ -11,8 +11,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/auth"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
+	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
@@ -40,9 +40,9 @@ func publicRoom(value room.Room) roomResponse {
 	return response
 }
 
-func roomIdentity(c *app.RequestContext) (auth.Identity, bool) {
+func roomIdentity(c *app.RequestContext) (user.Identity, bool) {
 	value, _ := c.Get("identity")
-	identity, ok := value.(auth.Identity)
+	identity, ok := value.(user.Identity)
 	if !ok {
 		writeAPIError(c, 401, "UNAUTHORIZED", "请先登录", false)
 	}
