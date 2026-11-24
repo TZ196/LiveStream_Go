@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/gorilla/websocket"
@@ -23,9 +23,9 @@ import (
 type Manager struct {
 	Tickets     *Tickets
 	rooms       *room.Service
-	producer    *messaging.Producer
-	projection  *messaging.ProjectionRepository
-	initializer *messaging.ProjectionInitializer
+	producer    *likes.Producer
+	projection  *likes.ProjectionRepository
+	initializer *likes.ProjectionInitializer
 	users       *user.Repository
 	epoch       string
 	available   atomic.Bool
@@ -46,7 +46,7 @@ type frame struct {
 }
 
 // NewManager 组装房间查询、一次性票据和 Kafka Producer。
-func NewManager(rooms *room.Service, producer *messaging.Producer, projection *messaging.ProjectionRepository, initializer *messaging.ProjectionInitializer, users *user.Repository, epoch string) *Manager {
+func NewManager(rooms *room.Service, producer *likes.Producer, projection *likes.ProjectionRepository, initializer *likes.ProjectionInitializer, users *user.Repository, epoch string) *Manager {
 	manager := &Manager{Tickets: NewTickets(), rooms: rooms, producer: producer, projection: projection, initializer: initializer, users: users, epoch: epoch, audiences: make(map[uint64]*audience)}
 	manager.metrics = newDeliveryMetrics(manager)
 	return manager
@@ -94,7 +94,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	manager.admission.RUnlock()
 	defer manager.unregister(session.ID, view, userID, client)
 	snapshotCtx, snapshotCancel := context.WithTimeout(context.Background(), time.Second)
-	var snapshot messaging.ProjectedLike
+	var snapshot likes.ProjectedLike
 	snapshotErr := manager.initializer.EnsureSession(snapshotCtx, roomID, session.ID)
 	if snapshotErr == nil {
 		snapshot, snapshotErr = manager.projection.ReadSession(snapshotCtx, roomText, strconv.FormatUint(session.ID, 10))
@@ -174,7 +174,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if err != nil || active.ID != session.ID {
 			return
 		}
-		event, err := messaging.NewLikeBatch(strconv.FormatUint(proof.identity.UserID, 10), roomText, input.SessionID, input.RequestID, count, time.Now())
+		event, err := likes.NewLikeBatch(strconv.FormatUint(proof.identity.UserID, 10), roomText, input.SessionID, input.RequestID, count, time.Now())
 		if err != nil {
 			return
 		}
@@ -191,7 +191,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 
 // readLikeCount 兼容旧客户端的空对象；新请求只接收正的 int64 点击数。
 func readLikeCount(data json.RawMessage) (int64, error) {
-	var payload messaging.LikePayload
+	var payload likes.LikePayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return 0, err
 	}

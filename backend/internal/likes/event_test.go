@@ -1,4 +1,4 @@
-package messaging
+package likes
 
 import (
 	"bytes"
@@ -65,12 +65,12 @@ func TestLikeBatchCompatibility(t *testing.T) {
 			t.Fatal(err)
 		}
 		record := &kgo.Record{Topic: "live.events", Key: key, Value: value}
-		decoded, err := DecodeLikeRecord(record)
-		if err != nil || decoded != event || decoded.ClickCount() != count {
+		decoded, err := DecodeLikeRecord(record, "test-topic")
+		if err != nil || decoded.Event != event || decoded.Event.ClickCount() != count || decoded.TopicID != "test-topic" || decoded.NextOffset != 1 {
 			t.Fatalf("批次记录不一致: count=%d, error=%v", count, err)
 		}
 		record.Key = []byte("wrong")
-		if _, err := DecodeLikeRecord(record); err == nil {
+		if _, err := DecodeLikeRecord(record, "test-topic"); err == nil {
 			t.Fatal("非法分区键未拒绝")
 		}
 	}

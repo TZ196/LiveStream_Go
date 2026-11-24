@@ -32,6 +32,8 @@ WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启。使用本轮新建的 `ls-r
 
 ## 复现入口
 
+点赞包阶段的 `go vet ./...`、普通测试和四命令构建通过。隔离环境执行 `go test -count=1 -v ./...` 及 `go test -race -count=1 -v ./...`，两轮各有 12 项通过，包含 6 项中间件用例，真实 API 用例留给整体运行单独执行。新增坏记录入口用例证实业务回调未触发且 Kafka 位移未提交；事务中插入不存在场次的事件时，inbox 和检查点一起回滚。日志为 `likes-tests-raw.log`、`likes-race-raw.log`。
+
 在 `backend/` 执行格式检查、`go vet ./...`、`go test -count=1 -v ./...`、`go test -race -count=1 ./...`、`go build ./cmd/...`。中间件用例读取 `LIVESTREAM_TEST_KAFKA`、`LIVESTREAM_TEST_REDIS`、`LIVESTREAM_TEST_MYSQL_DSN`。
 
 真实 API 用例另设 `LIVESTREAM_TEST_API` 和 `LIVESTREAM_WS_ORIGIN`，在全新隔离数据及 Topic 上运行迁移、启动 API 与 Worker，然后执行 `go test -count=1 -v ./internal/realtime -run '^TestLikeAPIIntegration$'`。原始存储用例与真实 API 用例分别使用独立的初始日志和数据库，避免两种测试生成的记录相互影响。

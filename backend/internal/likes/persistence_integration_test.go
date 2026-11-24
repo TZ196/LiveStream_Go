@@ -1,4 +1,4 @@
-package messaging
+package likes
 
 import (
 	"context"
@@ -54,13 +54,17 @@ func TestPersistenceIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := &kgo.Record{Topic: "live.events", Partition: 0, Offset: 0, Key: key, Value: value}
-	repo := NewPersistenceRepository(db)
-	if err := repo.PersistLike(context.Background(), record, "isolated-test-topic"); err != nil {
+	raw := &kgo.Record{Topic: "live.events", Partition: 0, Offset: 0, Key: key, Value: value}
+	record, err := DecodeLikeRecord(raw, "isolated-test-topic")
+	if err != nil {
 		t.Fatal(err)
 	}
-	record.Offset++
-	if err := repo.PersistLike(context.Background(), record, "isolated-test-topic"); err != nil {
+	repo := NewPersistenceRepository(db)
+	if err := repo.PersistLike(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	record.NextOffset++
+	if err := repo.PersistLike(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
 	var count int64
@@ -71,12 +75,36 @@ func TestPersistenceIntegration(t *testing.T) {
 	if err := db.Table("worker_checkpoints").Where("consumer_group = ? AND topic_id = ? AND partition_id = ?", "live-persistence", "isolated-test-topic", 0).Pluck("next_offset", &offset).Error; err != nil || offset != 2 {
 		t.Fatalf("检查点 = %d, error = %v", offset, err)
 	}
-	record.Offset++
-	record.Key = []byte("wrong")
-	if err := repo.PersistLike(context.Background(), record, "isolated-test-topic"); err == nil {
+	raw.Offset++
+	raw.Key = []byte("wrong")
+	if _, err := DecodeLikeRecord(raw, "isolated-test-topic"); err == nil {
 		t.Fatal("非法分区键未拒绝")
 	}
 	if err := db.Table("worker_checkpoints").Where("consumer_group = ? AND topic_id = ? AND partition_id = ?", "live-persistence", "isolated-test-topic", 0).Pluck("next_offset", &offset).Error; err != nil || offset != 2 {
 		t.Fatalf("失败后检查点被推进: %d, %v", offset, err)
+	}
+	// 事件身份合法，但缺少对应业务场次，第二次写入失败必须连同 inbox 一起回滚。
+	missingSession := fmt.Sprint(sessionID + 10000000000)
+	newRequest := uuid.Must(uuid.NewV7()).String()
+	broken, err := NewLikeBatch(fmt.Sprint(userID), fmt.Sprint(roomID), missingSession, newRequest, 5, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.Key, raw.Value, err = broken.KafkaRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = DecodeLikeRecord(raw, "isolated-test-topic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.PersistLike(context.Background(), record); err == nil {
+		t.Fatal("缺少业务场次应使事务失败")
+	}
+	if err := db.Table("consumer_inbox").Where("event_id = ?", broken.EventID).Count(&count).Error; err != nil || count != 0 {
+		t.Fatal("事务失败后仍留下 inbox 记录")
+	}
+	if err := db.Table("worker_checkpoints").Where("consumer_group = ? AND topic_id = ? AND partition_id = ?", "live-persistence", "isolated-test-topic", 0).Pluck("next_offset", &offset).Error; err != nil || offset != 2 {
+		t.Fatalf("回滚后检查点被推进: %d, %v", offset, err)
 	}
 }

@@ -1,4 +1,4 @@
-package messaging
+package likes
 
 import (
 	"context"
@@ -68,7 +68,7 @@ func TestDualConsumerIntegration(t *testing.T) {
 	results := make(chan error, 2)
 	var realtimeDone, persistenceDone atomic.Int32
 	go func() {
-		results <- realtime.Run(ctx, func(ctx context.Context, record *kgo.Record, _ string) error {
+		results <- realtime.Run(ctx, func(ctx context.Context, record ConsumedLike) error {
 			_, err := projection.ApplyLike(ctx, record)
 			if err == nil {
 				realtimeDone.Add(1)
@@ -77,8 +77,8 @@ func TestDualConsumerIntegration(t *testing.T) {
 		})
 	}()
 	go func() {
-		results <- worker.Run(ctx, func(ctx context.Context, record *kgo.Record, topicID string) error {
-			err := persistence.PersistLike(ctx, record, topicID)
+		results <- worker.Run(ctx, func(ctx context.Context, record ConsumedLike) error {
+			err := persistence.PersistLike(ctx, record)
 			if err == nil {
 				persistenceDone.Add(1)
 			}
@@ -125,5 +125,45 @@ func TestDualConsumerIntegration(t *testing.T) {
 				return
 			}
 		}
+	}
+}
+
+// TestInvalidRecordStopsConsumerIntegration 确保坏记录在业务回调前被拒绝且不推进 Kafka 位移。
+func TestInvalidRecordStopsConsumerIntegration(t *testing.T) {
+	broker := os.Getenv("LIVESTREAM_TEST_KAFKA")
+	if broker == "" {
+		t.Skip("需要隔离 Kafka")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	consumer, err := NewConsumer(ctx, []string{broker}, "live-realtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Close()
+	before, err := consumer.CommittedOffsets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer, err := NewProducer([]string{broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer producer.Close()
+	raw := &kgo.Record{Topic: "live.events", Key: []byte("invalid"), Value: []byte("{")}
+	if err := producer.client.ProduceSync(ctx, raw).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	err = consumer.Run(ctx, func(context.Context, ConsumedLike) error {
+		called = true
+		return nil
+	})
+	if err == nil || ctx.Err() != nil || called {
+		t.Fatalf("坏记录应在业务回调前拒绝: called=%v, error=%v", called, err)
+	}
+	after, err := consumer.CommittedOffsets(ctx)
+	if err != nil || after[raw.Partition] != before[raw.Partition] {
+		t.Fatalf("坏记录推进了 Kafka 位移: error=%v", err)
 	}
 }

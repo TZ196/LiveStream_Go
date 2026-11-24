@@ -1,15 +1,17 @@
-package messaging
+package likes
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"io"
 	"strconv"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // LikeEvent 保存一个不可拆分的点赞批次；版本 1 的历史事件固定为一次点击。
@@ -109,4 +111,62 @@ func (event LikeEvent) KafkaRecord() ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("序列化点赞事件: %w", err)
 	}
 	return []byte(event.RoomID + ":" + event.EventID), value, nil
+}
+
+// ConsumedLike 是通过记录校验的事件及消费位置。两个仓储共享这个输入，各自完成业务写入。
+// 原始 JSON 供 inbox 留档，生产时间只用于送达测量，位移提交由 Consumer 持有原记录执行。
+type ConsumedLike struct {
+	Event           LikeEvent
+	TopicID         string
+	Partition       int32
+	NextOffset      int64
+	RawJSON         []byte
+	ProducedAt      time.Time
+	HasProducerTime bool
+}
+
+// DecodeLikeRecord 校验来自 Kafka 的外壳、事件身份、指纹和分区键。
+// 消费积压时不使用当前时间窗口，避免拒绝已经接受的旧事件。
+func DecodeLikeRecord(record *kgo.Record, topicID string) (ConsumedLike, error) {
+	if record.Topic != "live.events" || len(record.Value) > 64*1024 {
+		return ConsumedLike{}, errors.New("事件 topic 或大小无效")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(record.Value))
+	decoder.DisallowUnknownFields()
+	var event LikeEvent
+	if err := decoder.Decode(&event); err != nil {
+		return ConsumedLike{}, fmt.Errorf("事件格式无效: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return ConsumedLike{}, errors.New("事件包含多余内容")
+	}
+	var expected LikeEvent
+	var err error
+	eventTime := time.UnixMilli(event.Timestamp)
+	switch event.SchemaVersion {
+	case 1:
+		expected, err = NewLikeEvent(event.UserID, event.RoomID, event.SessionID, event.RequestID, eventTime)
+	case 2:
+		expected, err = NewLikeBatch(event.UserID, event.RoomID, event.SessionID, event.RequestID, event.Payload.Count, eventTime)
+	default:
+		return ConsumedLike{}, errors.New("未知的点赞事件版本")
+	}
+	if err != nil {
+		return ConsumedLike{}, err
+	}
+	if event != expected {
+		return ConsumedLike{}, errors.New("事件身份、内容或指纹不匹配")
+	}
+	key, _, err := expected.KafkaRecord()
+	if err != nil {
+		return ConsumedLike{}, err
+	}
+	if !bytes.Equal(key, record.Key) {
+		return ConsumedLike{}, errors.New("事件分区键不匹配")
+	}
+	return ConsumedLike{
+		Event: event, TopicID: topicID, Partition: record.Partition, NextOffset: record.Offset + 1,
+		RawJSON: record.Value, ProducedAt: record.Timestamp, HasProducerTime: record.Attrs.TimestampType() == 0,
+	}, nil
 }

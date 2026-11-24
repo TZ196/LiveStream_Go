@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 )
 
 type BoardRow struct {
@@ -88,7 +88,7 @@ func (manager *Manager) readBoard(ctx context.Context, view *audience, roomID, s
 	return answer, nil
 }
 
-func (manager *Manager) resolveRows(ctx context.Context, ranked []messaging.RankedUser, previous []BoardRow) ([]BoardRow, error) {
+func (manager *Manager) resolveRows(ctx context.Context, ranked []likes.RankedUser, previous []BoardRow) ([]BoardRow, error) {
 	names := make(map[string]string, len(previous))
 	for _, row := range previous {
 		names[row.UserID] = row.Username

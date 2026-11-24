@@ -9,12 +9,11 @@ import (
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
 	"github.com/TZ196/LiveStream_Go/backend/internal/httpserver"
-	"github.com/TZ196/LiveStream_Go/backend/internal/messaging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/redis/go-redis/v9"
-	"github.com/twmb/franz-go/pkg/kgo"
 	"gorm.io/gorm"
 )
 
@@ -27,7 +26,7 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 	if !cfg.Enabled {
 		return func() {}, nil
 	}
-	producer, err := messaging.NewProducer(cfg.Brokers)
+	producer, err := likes.NewProducer(cfg.Brokers)
 	if err != nil {
 		return nil, err
 	}
@@ -39,14 +38,14 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 		_ = redisClient.Close()
 		return nil, fmt.Errorf("连接 Redis: %w", err)
 	}
-	projection, err := messaging.NewProjectionRepository(redisClient, cfg.ProjectionEpoch)
+	projection, err := likes.NewProjectionRepository(redisClient, cfg.ProjectionEpoch)
 	if err != nil {
 		producer.Close()
 		_ = redisClient.Close()
 		return nil, err
 	}
-	initializer := messaging.NewProjectionInitializer(db, projection)
-	consumer, err := messaging.OpenConsumerGroup(startup, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
+	initializer := likes.NewProjectionInitializer(db, projection)
+	consumer, err := likes.OpenConsumerGroup(startup, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
 	if err != nil {
 		producer.Close()
 		_ = redisClient.Close()
@@ -73,12 +72,8 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 				current.Close()
 				return
 			}
-			err := current.Run(ctx, func(ctx context.Context, record *kgo.Record, _ string) error {
-				event, err := messaging.DecodeLikeRecord(record)
-				if err != nil {
-					return err
-				}
-				if err = initializer.Ensure(ctx, event); err != nil {
+			err := current.Run(ctx, func(ctx context.Context, record likes.ConsumedLike) error {
+				if err := initializer.Ensure(ctx, record.Event); err != nil {
 					return err
 				}
 				result, err := projection.ApplyLike(ctx, record)
@@ -87,7 +82,7 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 				if err != nil {
 					return err
 				}
-				return manager.QueueLikeUpdate(ctx, event, result)
+				return manager.QueueLikeUpdate(ctx, record.Event, result)
 			})
 			current.Close()
 			if ctx.Err() != nil {
@@ -103,7 +98,7 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 				case <-time.After(5 * time.Second):
 				}
 				check, cancel := context.WithTimeout(ctx, 10*time.Second)
-				next, createErr := messaging.OpenConsumerGroup(check, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
+				next, createErr := likes.OpenConsumerGroup(check, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
 				cancel()
 				if createErr == nil {
 					current = next

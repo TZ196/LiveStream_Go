@@ -1,18 +1,13 @@
-package messaging
+package likes
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
 	"strconv"
 	"time"
-
-	"github.com/go-sql-driver/mysql"
-	"github.com/twmb/franz-go/pkg/kgo"
-	"gorm.io/gorm"
 )
 
 // PersistenceRepository 保存点赞事件和分区检查点。
@@ -23,62 +18,16 @@ func NewPersistenceRepository(db *gorm.DB) *PersistenceRepository {
 	return &PersistenceRepository{db: db}
 }
 
-// DecodeLikeRecord 校验来自 Kafka 的外壳、事件身份、指纹和分区键。
-// 消费积压时不使用当前时间窗口，避免拒绝已经接受的旧事件。
-func DecodeLikeRecord(record *kgo.Record) (LikeEvent, error) {
-	if record.Topic != "live.events" || len(record.Value) > 64*1024 {
-		return LikeEvent{}, errors.New("事件 topic 或大小无效")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(record.Value))
-	decoder.DisallowUnknownFields()
-	var event LikeEvent
-	if err := decoder.Decode(&event); err != nil {
-		return LikeEvent{}, fmt.Errorf("事件格式无效: %w", err)
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return LikeEvent{}, errors.New("事件包含多余内容")
-	}
-	var expected LikeEvent
-	var err error
-	eventTime := time.UnixMilli(event.Timestamp)
-	switch event.SchemaVersion {
-	case 1:
-		expected, err = NewLikeEvent(event.UserID, event.RoomID, event.SessionID, event.RequestID, eventTime)
-	case 2:
-		expected, err = NewLikeBatch(event.UserID, event.RoomID, event.SessionID, event.RequestID, event.Payload.Count, eventTime)
-	default:
-		return LikeEvent{}, errors.New("未知的点赞事件版本")
-	}
-	if err != nil {
-		return LikeEvent{}, err
-	}
-	if event != expected {
-		return LikeEvent{}, errors.New("事件身份、内容或指纹不匹配")
-	}
-	key, _, err := expected.KafkaRecord()
-	if err != nil {
-		return LikeEvent{}, err
-	}
-	if !bytes.Equal(key, record.Key) {
-		return LikeEvent{}, errors.New("事件分区键不匹配")
-	}
-	return event, nil
-}
-
 // PersistLike 在同一事务写入去重记录、点赞事件和下一条位移。
 // 重复事件必须与先前内容一致；发生冲突或任何数据库错误时回滚且不能提交 Kafka 位移。
-func (repository *PersistenceRepository) PersistLike(ctx context.Context, record *kgo.Record, topicID string) error {
-	if topicID == "" {
+func (repository *PersistenceRepository) PersistLike(ctx context.Context, record ConsumedLike) error {
+	if record.TopicID == "" {
 		return errors.New("缺少 Kafka topic 身份")
 	}
-	event, err := DecodeLikeRecord(record)
-	if err != nil {
-		return err
-	}
+	event := record.Event
 	return repository.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		sql := `INSERT INTO consumer_inbox (event_id, request_id, request_hash, event_type, user_id, room_id, session_id, event_time, event_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-		result := tx.Exec(sql, event.EventID, event.RequestID, event.RequestHash, event.EventType, event.UserID, event.RoomID, event.SessionID, time.UnixMilli(event.Timestamp).UTC(), string(record.Value))
+		result := tx.Exec(sql, event.EventID, event.RequestID, event.RequestHash, event.EventType, event.UserID, event.RoomID, event.SessionID, time.UnixMilli(event.Timestamp).UTC(), string(record.RawJSON))
 		if result.Error != nil {
 			var mysqlErr *mysql.MySQLError
 			if !errors.As(result.Error, &mysqlErr) || mysqlErr.Number != 1062 {
@@ -107,6 +56,48 @@ func (repository *PersistenceRepository) PersistLike(ctx context.Context, record
 			}
 		}
 		sql = `INSERT INTO worker_checkpoints (consumer_group, topic_id, partition_id, next_offset) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE next_offset = GREATEST(next_offset, VALUES(next_offset))`
-		return tx.Exec(sql, "live-persistence", topicID, record.Partition, record.Offset+1).Error
+		return tx.Exec(sql, "live-persistence", record.TopicID, record.Partition, record.NextOffset).Error
 	})
+}
+
+// ValidatePersistenceStartup 核对数据库检查点与 Kafka 位移，防止以错误 Topic 继续消费。
+func (repository *PersistenceRepository) ValidatePersistenceStartup(ctx context.Context, topicID string, committed map[int32]int64) error {
+	return repository.validateCheckpoints(ctx, topicID, committed, false)
+}
+
+func (repository *PersistenceRepository) validateCheckpoints(ctx context.Context, topicID string, committed map[int32]int64, atLogEnd bool) error {
+	var rows []struct {
+		TopicID     string
+		PartitionID int32
+		NextOffset  int64
+	}
+	if err := repository.db.WithContext(ctx).Table("worker_checkpoints").Select("topic_id,partition_id,next_offset").Where("consumer_group = ?", "live-persistence").Find(&rows).Error; err != nil {
+		return err
+	}
+	checkpoints := make(map[int32]int64, len(rows))
+	for _, row := range rows {
+		if row.TopicID != topicID {
+			return errors.New("持久化 Topic 身份改变，需要恢复")
+		}
+		checkpoints[row.PartitionID] = row.NextOffset
+	}
+	for partition, offset := range committed {
+		checkpoint, exists := checkpoints[partition]
+		if !exists {
+			if offset > 0 {
+				return fmt.Errorf("分区 %d 数据库检查点丢失", partition)
+			}
+			continue
+		}
+		if offset < 0 {
+			return fmt.Errorf("分区 %d Kafka 位移丢失", partition)
+		}
+		if atLogEnd && checkpoint > offset {
+			return fmt.Errorf("分区 %d 数据库检查点超出补建屏障", partition)
+		}
+		if checkpoint < offset {
+			return fmt.Errorf("分区 %d 数据库检查点落后于 Kafka", partition)
+		}
+	}
+	return nil
 }

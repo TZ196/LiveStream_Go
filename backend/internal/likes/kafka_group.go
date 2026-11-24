@@ -1,4 +1,4 @@
-package messaging
+package likes
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // ConsumerGroup 在同一进程内持有多个独立 Kafka 成员，各成员只处理分配给自己的分区。
@@ -60,7 +59,7 @@ func OpenConsumerGroup(ctx context.Context, brokers []string, name string, size 
 }
 
 // Run 启动组内所有成员。任一成员失败就停止同组拉取，等在途处理结束后再统一复查。
-func (group *ConsumerGroup) Run(ctx context.Context, process func(context.Context, *kgo.Record, string) error) error {
+func (group *ConsumerGroup) Run(ctx context.Context, process func(context.Context, ConsumedLike) error) error {
 	groupCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
