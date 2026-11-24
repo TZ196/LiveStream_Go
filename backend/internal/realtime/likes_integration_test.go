@@ -2,9 +2,11 @@ package realtime
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -24,6 +27,121 @@ type observedFrame struct {
 	Data      json.RawMessage `json:"data"`
 	at        time.Time
 	err       error
+}
+
+// recoveryStep 与外部隔离环境控制进程同步，真实进程的停启和暂停由控制进程执行。
+func recoveryStep(t *testing.T, directory, reached, proceed string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(directory, reached), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(directory, proceed)); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("等待隔离依赖控制进程超时")
+}
+
+// TestLikeDependencyRecoveryIntegration 验证 Worker 停止时实时链路可用，以及 Redis 暂停后的重放。
+func TestLikeDependencyRecoveryIntegration(t *testing.T) {
+	directory := os.Getenv("LIVESTREAM_TEST_CONTROL_DIR")
+	if directory == "" || os.Getenv("LIVESTREAM_TEST_API") == "" {
+		t.Skip("需要隔离 API 和依赖故障控制进程")
+	}
+	token := apiAccount(t)
+	var room struct{ ID string }
+	apiRequest(t, "POST", "/api/v1/rooms", token, map[string]string{"title": "依赖恢复回归"}, &room, 201)
+	socket, session := apiConnect(t, token, room.ID, "0")
+	db, err := gorm.Open(mysql.Open(os.Getenv("LIVESTREAM_TEST_MYSQL_DSN")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	countRows := func() int64 {
+		var count int64
+		if err := db.Table("interaction_events").Where("session_id = ?", session).Count(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	recoveryStep(t, directory, "connected", "worker-stopped")
+	apiLike(t, socket, session, uuid.Must(uuid.NewV7()).String(), 5)
+	total, accepted := false, false
+	apiAwait(t, socket, func(frame observedFrame) bool {
+		total = total || frame.Type == "LIKE_UPDATE"
+		accepted = accepted || frame.Type == "ACK"
+		return total && accepted
+	})
+	if countRows() != 0 {
+		t.Fatal("Worker 停止期间出现持久化记录")
+	}
+	recoveryStep(t, directory, "worker-backlog", "worker-resumed")
+	deadline := time.Now().Add(15 * time.Second)
+	for countRows() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("Worker 恢复后没有处理积压")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	recoveryStep(t, directory, "mysql-caught-up", "redis-paused")
+	request := uuid.Must(uuid.NewV7()).String()
+	apiLike(t, socket, session, request, 5)
+	// Redis 失败时 Kafka 的接受确认和 Worker 独立完成，实时组发出暂停通知。
+	accepted = false
+	paused := false
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for !accepted || !paused {
+		select {
+		case frame, ok := <-socket.frames:
+			if !ok || frame.err != nil {
+				t.Fatal("依赖暂停时连接提前关闭")
+			}
+			accepted = accepted || (frame.Type == "ACK" && frame.RequestID == request)
+			paused = paused || frame.Type == "LIKES_UNAVAILABLE"
+		case <-timer.C:
+			t.Fatal("未观察到 Kafka 接受和实时消费者暂停")
+		}
+	}
+	if countRows() != 2 {
+		t.Fatal("Redis 暂停影响了持久化组")
+	}
+	recoveryStep(t, directory, "redis-pause-observed", "redis-resumed")
+	client := redis.NewClient(&redis.Options{Addr: os.Getenv("LIVESTREAM_TEST_REDIS")})
+	defer client.Close()
+	key := "ls:v1:projection:" + os.Getenv("LIVESTREAM_PROJECTION_EPOCH") + ":session:" + session
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for {
+		count, err := client.HGet(ctx, key, "likes").Result()
+		if err == nil && count == "10" {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("Redis 恢复后未补齐第二个批次")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var board BoardResponse
+	apiRequest(t, "GET", "/api/v1/rooms/"+room.ID+"/sessions/"+session+"/like-leaderboard", token, nil, &board, 200)
+	if board.Me.Count != "10" {
+		t.Fatal("恢复后的 HTTP 个人数不正确")
+	}
+	reconnected, _ := apiConnect(t, token, room.ID, "10")
+	apiLike(t, reconnected, session, request, 5)
+	apiAwait(t, reconnected, func(frame observedFrame) bool { return frame.Type == "ACK" && frame.RequestID == request })
+	apiRequest(t, "GET", "/api/v1/rooms/"+room.ID+"/sessions/"+session+"/like-leaderboard", token, nil, &board, 200)
+	if board.Me.Count != "10" || countRows() != 2 {
+		t.Fatal("依赖恢复后重试产生了重复业务效果")
+	}
+	t.Log("Worker stop/restart, independent Kafka ACK during Redis pause, consumer recovery and reconnect verified")
 }
 
 type apiSocket struct {

@@ -9,6 +9,7 @@
 | 在本机运行项目 | [开发与运行说明](deployment.md) |
 | 查看已完成、待解决和下一步 | [项目状态](status.md) |
 | 按阶段继续开发 | [开发计划](development-plan.md) |
+| 从源码读懂后端结构与点赞链路 | [Backend 结构](../backend/ARCHITECTURE.md) |
 | 设计功能或对接接口 | 下方设计索引 |
 | 检查功能与查看证据 | [验证计划](verification/plan.md)及下方阶段报告 |
 | 查参考项目的来源与问题 | [源码审查](reviews/live-stream-danmaku-review.md) |
@@ -33,6 +34,7 @@
 - [P1a：工程骨架](verification/reports/p1a.md)
 - [P1b：数据库与用户认证](verification/reports/p1b.md)
 - [P2：房间管理及主干合并复查](verification/reports/p2.md)
+- [Backend 精简重构与点赞回归](verification/reports/backend-refactor.md)
 
 ## 维护约定
 

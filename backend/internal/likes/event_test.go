@@ -64,10 +64,13 @@ func TestLikeBatchCompatibility(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record := &kgo.Record{Topic: "live.events", Key: key, Value: value}
+		record := &kgo.Record{Topic: "live.events", Key: key, Value: value, Partition: 7, Offset: 9, Timestamp: now}
 		decoded, err := DecodeLikeRecord(record, "test-topic")
-		if err != nil || decoded.Event != event || decoded.Event.ClickCount() != count || decoded.TopicID != "test-topic" || decoded.NextOffset != 1 {
+		if err != nil || decoded.Event != event || decoded.Event.ClickCount() != count {
 			t.Fatalf("批次记录不一致: count=%d, error=%v", count, err)
+		}
+		if decoded.TopicID != "test-topic" || decoded.Partition != 7 || decoded.NextOffset != 10 || !bytes.Equal(decoded.RawJSON, value) || !decoded.ProducedAt.Equal(now) || !decoded.HasProducerTime {
+			t.Fatal("消费元数据或原始 JSON 在校验时改变")
 		}
 		record.Key = []byte("wrong")
 		if _, err := DecodeLikeRecord(record, "test-topic"); err == nil {

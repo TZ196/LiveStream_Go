@@ -8,6 +8,8 @@ WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启，宿主 CPU 为 i7-13620H，
 
 测试凭据随机生成并只放在本机临时目录。原始日志、运行环境和测试用的进程管理脚本位于 `/tmp/livestream-refactor-mxy426cz/`。临时目录的保留时间取决于本机清理策略，下表记录本轮实际结果。
 
+验证结束后已停止并移除本轮三个临时容器及其匿名卷，原始日志和控制脚本保留在上述目录。
+
 ## 重构前基线
 
 | 检查 | 实际结果 |
@@ -29,8 +31,34 @@ WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启，宿主 CPU 为 i7-13620H，
 | 版本与轮次 | ACK 样本 | ACK p95 / p99 | 快照样本 | 快照可见 p95 / p99 |
 | --- | --- | --- | --- | --- |
 | 基线，第 1 轮 | 100 | 15.229416 / 15.586443 ms | 100 | 206.053921 / 216.280795 ms |
+| 基线，第 2 轮 | 100 | 14.285312 / 14.590244 ms | 100 | 206.080738 / 213.528399 ms |
+| 基线，第 3 轮 | 100 | 14.262917 / 14.758335 ms | 100 | 207.852567 / 212.186084 ms |
+| 重构，第 1 轮 | 100 | 14.396848 / 14.585701 ms | 100 | 208.254861 / 214.871326 ms |
+| 重构，第 2 轮 | 100 | 14.580035 / 14.964393 ms | 100 | 207.718008 / 215.638881 ms |
+| 重构，第 3 轮 | 100 | 14.362838 / 14.498397 ms | 100 | 207.698409 / 216.228363 ms |
+
+每轮重新建立本任务隔离 Topic、两个组、Redis 和数据库。API 与 Worker 使用普通构建，两个版本各轮分别通过 101 条事件与 305 次点击的最终一致性断言。两版三轮结果接近，范围只覆盖这组短时负载。长期容量继续按 P8 测量。逐轮日志为 `baseline-api-tests.log`、`baseline-api-2.log`、`baseline-api-3.log`、`final-api-tests.log`、`final-api-2.log`、`final-api-3.log`。
+
+## 依赖故障与维护命令
+
+`TestLikeDependencyRecoveryIntegration` 在相同隔离环境分别连接基线和重构后的真实 API，控制进程实际执行 Worker SIGTERM、重新启动和 Redis pause/unpause。两版均通过，下列状态都有断言。
+
+1. Worker 已退出时提交 5 次点击，Broker ACK 和实时总数已到，MySQL 为 0 条。
+2. Worker 重新加入原持久化组后，同一场次追平为 1 条事件。
+3. 暂停 Redis 后再发 5 次点击，Kafka 仍返回接受 ACK，MySQL 独立处理为 2 条，API 实时组进入暂停并发送 LIKES_UNAVAILABLE。
+4. Redis 恢复后，实时组复查进度并重放至总数 10，HTTP 个人数为 10。重新申请票据，WebSocket 首帧为 10，重试第二批仍为 2 条事件和 10 次点击。
+
+两轮用例分别耗时 28.66 秒和 28.89 秒，证据为 `baseline-recovery-test.log`、`final-recovery-test.log` 及相应进程日志。此过程保留 Redis 实例代次，验证的是依赖短时暂停与正常位移重放。
+
+最后一轮普通负载完成且两个进程退出后，实际执行 `backfill-like-board` 成功，日志为 `final-backfill.log`。它核对组无人、日志屏障和检查点，再对已有总数相符的场次补榜。
 
 ## 复现入口
+
+最终版本的格式、vet、四个命令构建均通过。配置隔离中间件分别运行普通和 race 全包测试，两轮各 13 项通过，含 7 项真实中间件用例，两项真实 API 用例另行执行。7 项中间件覆盖双组、坏记录不提交、Producer、SQL 去重与事务回滚、Redis 重放、106 人前百截断与榜外个人数及同分排序、计数溢出时数据与位置均不变、房间场次生命周期。日志为 `final-tests-raw.log`、`final-race-raw.log`，10 个包没有测试文件，仅编译检查。
+
+另外为 API 和 Worker 构建 `-race` 可执行文件，再用 `go test -race -count=1 -v ./internal/realtime` 访问这两个真实进程。入口用例和 3 项本地并发回归通过，故障用例在普通进程的专项运行中验证。客户端、API、Worker 日志均无竞争报告，SIGTERM 后在 10 秒内退出。运行期间实际核对两组各 4 个成员、各覆盖 16 个分区，停发后 lag 均为 0，`/metrics` 的投影、快照、入队、队列深度及连接关闭指标可读。证据为 `final-api-race-tests.log`、`race-api.log`、`race-worker.log`、`race-groups.log`、`race-metrics.txt`。
+
+实际进程额外检查了关闭点赞开关时的就绪、缺失和过期 Bearer 的 401、trace ID 对应、注册登录合计第 11 次尝试的 429，以及 Redis 初始化不可用时启动退出 1。相应日志为 `disabled-api.log`、`failed-startup.log`。慢连接回归使用真实有界队列的满队列与并发锁路径，公网长时间慢读和浏览器端单程采样继续按完整验证设计执行。
 
 点赞包阶段的 `go vet ./...`、普通测试和四命令构建通过。隔离环境执行 `go test -count=1 -v ./...` 及 `go test -race -count=1 -v ./...`，两轮各有 12 项通过，包含 6 项中间件用例，真实 API 用例留给整体运行单独执行。新增坏记录入口用例证实业务回调未触发且 Kafka 位移未提交；事务中插入不存在场次的事件时，inbox 和检查点一起回滚。日志为 `likes-tests-raw.log`、`likes-race-raw.log`。
 
@@ -39,5 +67,7 @@ WSL2 Ubuntu，Linux/amd64，Go 1.26.8，CGO 开启，宿主 CPU 为 i7-13620H，
 在 `backend/` 执行格式检查、`go vet ./...`、`go test -count=1 -v ./...`、`go test -race -count=1 ./...`、`go build ./cmd/...`。中间件用例读取 `LIVESTREAM_TEST_KAFKA`、`LIVESTREAM_TEST_REDIS`、`LIVESTREAM_TEST_MYSQL_DSN`。
 
 真实 API 用例另设 `LIVESTREAM_TEST_API` 和 `LIVESTREAM_WS_ORIGIN`，在全新隔离数据及 Topic 上运行迁移、启动 API 与 Worker，然后执行 `go test -count=1 -v ./internal/realtime -run '^TestLikeAPIIntegration$'`。原始存储用例与真实 API 用例分别使用独立的初始日志和数据库，避免两种测试生成的记录相互影响。
+
+故障用例额外设置专用空目录 `LIVESTREAM_TEST_CONTROL_DIR` 并运行 `go test -count=1 -v ./internal/realtime -run '^TestLikeDependencyRecoveryIntegration$' -timeout 150s`。本轮控制脚本为临时目录下的 `faults.py`，按用例写出的 connected、worker-backlog、mysql-caught-up、redis-pause-observed 标记依次停止 Worker、恢复 Worker、暂停 Redis、恢复 Redis，再写入相应的继续标记。对照测试源码可复现这一顺序，超时会停止用例并恢复本轮暂停的容器。
 
 案例关联 IDEM-01、KAFKA-01/02/03/05、WS-01/04/05、UI-01 和参考审查 ISSUE-03/04/05/07。各案例的覆盖以表中实际操作为准。完整 Redis 丢失重建、异常事件持久隔离、关房在途完成屏障与公网长时间负载继续按项目状态维护。

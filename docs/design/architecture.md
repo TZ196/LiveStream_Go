@@ -22,13 +22,15 @@ RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房
 
 ## 模块责任
 
+WebSocket Gateway、RoomHub 和消息处理是逻辑职责。当前实时点赞由 realtime.Manager 的握手与 readMessages 负责接入，audience/delivery 负责连接维护及入队，likes.Producer 负责发送，cmd/api/likes.go 的 processLike 协调消费。下面的职责边界用于这些实现及后续弹幕演进。
+
 | 模块或角色 | 输入与输出 | 负责 | 依赖边界 |
 | --- | --- | --- | --- |
 | 前端页面与状态 | 用户动作、HTTP 结果、WS 消息 → 可解释的界面状态 | 登录、房间、待确认操作、去重和重连 | 不计算权威点赞总数，不访问中间件 |
 | 业务 HTTP Handler | 请求 → 响应 | 参数校验、认证上下文、错误映射 | 只调用 Service |
 | User Service | 注册登录、当前用户 → 用户结果 | 用户名规范化、密码哈希与校验、密码计算名额 | User Repository，不依赖 HTTP |
 | User Repository | 用户查询与创建 → 数据或错误 | GORM 数据访问、数据库重复键映射 | MySQL，不定义业务响应 |
-| 令牌模块与认证中间件 | 已验证账号 → JWT；Bearer → 身份 | auth 模块签发验签；Hertz 中间件提取并传递身份 | 不从客户端 user_id 确定身份 |
+| 令牌模块与认证中间件 | 已验证账号 → JWT；Bearer → 身份 | user/token.go 签发验签，Hertz 中间件提取并传递身份 | 不从客户端 user_id 确定身份 |
 | Room Service | 房间操作 → 房间状态 | 所有者权限、生命周期、准入锁 | Room Repository、RoomHub |
 | WebSocket Gateway | 票据握手及消息帧 → 已认证命令 | Origin、票据、读写循环、大小与心跳 | User 身份、Room Service、消息 Service |
 | RoomHub | 注册、移除、广播 → 连接队列 | 在线数、慢客户端、连接与房间清理 | 不执行数据库查询或 Kafka 发送 |
@@ -45,29 +47,33 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 
 参考实现中 Manager 的外部 I/O 可拖住连接注册和注销，见 [审查 ISSUE-05](../reviews/live-stream-danmaku-review.md)。消息分发层只解析和校验传输 DTO，再调用业务 Service；数据库 Model 不直接承担 WS 请求或事件契约。外部发布在房间锁之外执行，并受取消、超时和并发预算约束。
 
-## 目标目录
+## 当前目录与后续规划
 
 | 路径 | 职责 | 建立阶段 |
 | --- | --- | --- |
 | backend/go.mod、backend/go.sum | 唯一后端 Module 与锁定依赖 | P1a |
 | backend/cmd/api/main.go | API 配置、组装、启动与关闭 | P1a |
 | backend/cmd/migrate/main.go | 独立运行版本迁移，成功退出 0、失败退出 1 | P1b |
-| backend/internal/httpserver | Hertz 实例、HTTP 路由与探针 Handler | P1a |
+| backend/internal/httpserver | Hertz 实例、HTTP 路由与探针，middleware.go 放访问日志和认证限流 | P1a |
 | backend/internal/config、logging | 配置合并与校验、应用日志和框架日志级别 | P1a |
 | backend/cmd/worker/main.go | Worker 组装、启动与关闭 | P4 |
-| backend/internal/user、room | 用户与房间业务 | P1b、P2 |
-| backend/internal/auth | JWT 签发和校验，不依赖 Hertz | P1b |
-| backend/internal/websocket | Gateway、Hub、连接 | P3 |
-| backend/internal/danmaku、interaction | 弹幕与点赞业务 | P3、P4 |
-| backend/internal/messaging | 事件、发布、消费、幂等协调 | P4 点赞；P5 扩展弹幕 |
-| backend/internal/database、cache、middleware | 数据访问及中间件基础设施 | 随阶段建立 |
+| backend/internal/user、room | 用户与房间业务，user/token.go 提供 JWT 和身份 | P1b、P2 |
+| backend/internal/realtime | WebSocket 握手和读写、票据、场次锁、在线快照、榜单分发及送达指标 | 当前点赞子链路 |
+| backend/internal/likes | 事件、Kafka 收发和消费组、Redis 投影、MySQL 事务及恢复检查 | 当前点赞子链路 |
+| backend/internal/database/mysql.go | GORM 连接池、迁移版本与所需结构的只读检查 | P1b |
+| backend/cmd/backfill-like-board/main.go | 在停写屏障下补建已有场次的榜单 | 当前点赞榜 |
+| backend/internal/danmaku | 后续弹幕业务，复用实时连接和按实际需求提取的 Kafka 代码 | P5 规划 |
 | backend/configs | 无秘密配置样例 | P1a |
 | backend/migrations | 迁移调度与固定版本的 GORM 变更步骤，兼容已有成功记录 | P1b 起 |
 | frontend/src、frontend/package.json | Vue 工程与检查脚本 | P1a |
 | deployments/docker/compose.yaml | 统一 Compose，按阶段启用服务 | P1b 起 |
 | backend/Dockerfile | API、Worker 镜像构建 | P7 |
 
-以上是计划目录；不为尚未使用的 Worker 或中间件创建空实现。
+当前 backend 有 8 个 internal 包、44 个非测试 Go 文件。点赞代码集中在 likes，连接状态集中在 realtime，入口负责组装两者。代码阅读入口见 [Backend 结构](../../backend/ARCHITECTURE.md)，本轮基线与回归结果见 [精简重构验证](../verification/reports/backend-refactor.md)。表中 P5、P7 文件按相应阶段建立。
+
+当前 Kafka 循环对每条记录调用一次 DecodeLikeRecord，得到 ConsumedLike，包含已校验事件、原始 JSON、Topic 身份、分区、下一条位置和生产时间。API 的 processLike 依次完成场次初始化、Redis 原子投影和在线内存同步，Worker 回调完成持久化事务，两者成功后各自的 Consumer 才提交原记录。八天积压检查归实时投影，延迟的历史持久化按事件身份校验。场次字段和锁一起定义在 audience.go，manager.go 在同文件的 readMessages 中读取连接帧。cmd/api/likes.go 的 runRealtimeConsumer 管暂停、组回收和复查，processLike 管单条事件。
+
+这一划分面向当前点赞单一事件类型，Kafka 专用文件使用 kafka_ 前缀，Redis 与 MySQL 操作各由仓储负责。后续弹幕也使用同一套收发和组管理时，再根据实际共用部分建立 messaging。外部依赖发生故障时沿用恢复设计中的处理、检查点和复查规则。
 
 ## 容量和并发边界
 
