@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -134,9 +135,27 @@ func TestAutomaticRedisRecoveryIntegration(t *testing.T) {
 	send(socket, uuid.Must(uuid.NewV7()).String(), 7)
 	waitSQL(7)
 	waitReady("7", original, false)
+	var initial struct {
+		Generation string `json:"projection_generation"`
+	}
+	if err := json.Unmarshal(socket.initial.Data, &initial); err != nil {
+		t.Fatal(err)
+	}
 	recoveryStep(t, directory, "capture-aof", "redis-restarted")
 	waitReady("7", original, false)
-	socket, _ = apiConnect(t, token, room.ID, "7")
+	// 正常重启沿用同一 epoch，但共享原连接仍必须收到新的能力快照。
+	apiAwait(t, socket, func(frame observedFrame) bool {
+		var state struct {
+			Generation string `json:"projection_generation"`
+			Available  bool   `json:"likes_available"`
+		}
+		if frame.Type != "ROOM_STATE" || json.Unmarshal(frame.Data, &state) != nil {
+			return false
+		}
+		before, _ := strconv.ParseUint(initial.Generation, 10, 64)
+		after, _ := strconv.ParseUint(state.Generation, 10, 64)
+		return state.Available && after > before
+	})
 	second := uuid.Must(uuid.NewV7()).String()
 	send(socket, second, 5)
 	waitSQL(12)
@@ -167,16 +186,23 @@ func TestAutomaticRedisRecoveryIntegration(t *testing.T) {
 		apiRequest(t, "GET", "/api/v1/rooms/"+room.ID+"/likes-state", token, nil, &state, 200)
 		return state.State == "RECOVERING"
 	})
-	// 点赞恢复不影响普通 HTTP；新连接明确拒绝而不发送虚假成功。
+	// 点赞恢复不影响普通 HTTP 和共享握手；未知计数明确返回不可用。
 	apiRequest(t, "GET", "/readyz", "", nil, nil, 200)
 	apiRequest(t, "GET", "/api/v1/rooms/"+room.ID, token, nil, nil, 200)
 	if apiAccount(t) == "" {
 		t.Fatal("恢复期间不能注册登录")
 	}
-	apiRequest(t, "POST", "/api/v1/rooms/"+room.ID+"/ws-ticket", token, struct{}{}, nil, 503)
+	duringRecovery, _ := apiConnect(t, token, room.ID, "")
 	recoveryStep(t, directory, "waiting-for-worker", "worker-resumed")
 	waitReady("19", rebuiltEpoch, true)
-	socket, _ = apiConnect(t, token, room.ID, "19")
+	apiAwait(t, duringRecovery, func(frame observedFrame) bool {
+		var data struct {
+			Available bool   `json:"likes_available"`
+			Count     string `json:"like_count"`
+		}
+		return frame.Type == "ROOM_STATE" && json.Unmarshal(frame.Data, &data) == nil && data.Available && data.Count == "19"
+	})
+	socket = duringRecovery
 	expectDuplicate(socket, backlog, 4, "19")
 	send(socket, uuid.Must(uuid.NewV7()).String(), 2)
 	waitSQL(21)

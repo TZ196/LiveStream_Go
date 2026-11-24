@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
@@ -37,6 +38,10 @@ func (producer *Producer) Publish(ctx context.Context, event Event) error {
 	record, err := event.KafkaRecord()
 	if err != nil {
 		return err
+	}
+	// 诊断头不属于冻结事件，不参与业务身份；重试观测本次接收至入队。
+	if received, ok := ctx.Value(receivedAtKey{}).(time.Time); ok {
+		record.Headers = []kgo.RecordHeader{{Key: "api_received_at_ns", Value: []byte(strconv.FormatInt(received.UnixNano(), 10))}}
 	}
 	result := producer.client.ProduceSync(ctx, record)
 	if err := result.FirstErr(); err != nil {

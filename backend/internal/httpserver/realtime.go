@@ -27,11 +27,6 @@ func (s *Server) EnableRealtime(manager *realtime.Manager, origin string) {
 
 // issueWSTicket 为已认证用户签发绑定房间、场次和来源的短期票据。
 func (s *Server) issueWSTicket(ctx context.Context, c *app.RequestContext) {
-	if s.realtime.State() != "READY" {
-		c.Header("Retry-After", "2")
-		writeAPIError(c, 503, "LIKES_UNAVAILABLE", "点赞服务正在恢复，点击可暂存在当前页面", true)
-		return
-	}
 	identity, ok := roomIdentity(c)
 	if !ok {
 		return

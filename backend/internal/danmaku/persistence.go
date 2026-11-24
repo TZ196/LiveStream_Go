@@ -28,7 +28,7 @@ type Message struct {
 	Content           string    `json:"content"`
 	ModerationVersion string    `json:"-"`
 	CreatedAt         time.Time `json:"created_at"`
-	PersistedAt       time.Time `json:"-"`
+	PersistedAt       time.Time `json:"-" gorm:"type:datetime(3);default:CURRENT_TIMESTAMP(3)"`
 }
 
 func (Message) TableName() string { return "danmaku_messages" }
@@ -106,7 +106,7 @@ func (repository *Repository) ValidateCheckpoint(ctx context.Context, topicID st
 	}
 	for partition, offset := range committed {
 		if offset < 0 {
-			if count > 0 || len(rows) > 0 {
+			if saved[partition] > 0 || (count > 0 && len(rows) == 0) {
 				return ErrBlocked
 			}
 			continue
@@ -164,22 +164,6 @@ func (repository *Repository) HasHistory(ctx context.Context) (bool, error) {
 	var count int64
 	err := repository.db.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM danmaku_messages LIMIT 1)").Scan(&count).Error
 	return count > 0, err
-}
-
-// ValidateRealtime 不把已有历史且丢失消费位置的组当作全新组，避免意外回放整段历史。
-func (repository *Repository) ValidateRealtime(ctx context.Context, topicID string, committed map[int32]int64) error {
-	history, err := repository.HasHistory(ctx)
-	if err != nil {
-		return err
-	}
-	if history {
-		for _, position := range committed {
-			if position < 0 {
-				return ErrBlocked
-			}
-		}
-	}
-	return nil
 }
 
 func (repository *Repository) SessionBelongs(ctx context.Context, room, session uint64) (bool, error) {

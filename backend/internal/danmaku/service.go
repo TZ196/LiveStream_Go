@@ -14,6 +14,8 @@ import (
 )
 
 // Publisher 将业务提交边界限制在 Broker 确认，传输错误不能解释成确定拒绝。
+type receivedAtKey struct{}
+
 type Publisher interface {
 	Publish(context.Context, Event) error
 }
@@ -60,6 +62,7 @@ func storedEvent(raw string, candidate Event) (Event, error) {
 // Submit 先恢复原请求结果，再对新请求执行场次准入、限流、审核和冻结。
 func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, requestID, content string) (Event, error) {
 	started := time.Now()
+	ctx = context.WithValue(ctx, receivedAtKey{}, started)
 	defer func() { service.Metrics.Submit.Observe(time.Since(started).Seconds()) }()
 	candidate, err := NewRequest(userID, roomID, sessionID, requestID, content, time.Now())
 	if err != nil {
@@ -74,7 +77,7 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 		case "ACCEPTED":
 			event, err := storedEvent(state.Event, candidate)
 			if err != nil {
-				return Event{}, failure("DANMAKU_UNAVAILABLE", "原请求记录需要核对", true)
+				return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "原请求记录需要核对", Pending: true, Retryable: true, RetryAfter: 2000}
 			}
 			service.Metrics.Results.WithLabelValues("accepted_retry").Inc()
 			return event, nil
@@ -85,7 +88,7 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 		// Redis 缺失不能证明请求没有发生；可靠历史命中时直接返回原接受结果。
 		old, found, findErr := service.Repository.FindRequest(ctx, userID, requestID)
 		if findErr != nil {
-			return Event{}, failure("DANMAKU_UNAVAILABLE", "暂时无法核对弹幕记录", true)
+			return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "暂时无法核对弹幕记录", Pending: true, Retryable: true, RetryAfter: 2000}
 		}
 		if found {
 			if old.EventID != candidate.EventID || old.RequestHash != candidate.RequestHash {
@@ -108,6 +111,9 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	sessionNumber, _ := strconv.ParseUint(sessionID, 10, 64)
 	active, err := service.rooms.ActiveSession(ctx, roomNumber)
 	if err != nil || active.ID != sessionNumber {
+		if frozen {
+			return Event{}, &Fault{Code: "ROOM_CLOSED", Message: "原场次已结束，原弹幕结果仍待核对，请查询历史", Pending: true}
+		}
 		return Event{}, failure("ROOM_CLOSED", "原直播场次已结束，不能转发到新场次", false)
 	}
 	owner := uuid.NewString()
@@ -115,6 +121,9 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	claim, err := service.Store.Begin(ctx, candidate, owner)
 	service.Metrics.Limit.Observe(time.Since(beforeLimit).Seconds())
 	if err != nil || len(claim) != 4 {
+		if frozen {
+			return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "暂时无法核对原请求", Pending: true, Retryable: true, RetryAfter: 2000}
+		}
 		return Event{}, failure("DANMAKU_UNAVAILABLE", "弹幕请求登记暂不可用", true)
 	}
 	switch claim[0] {
@@ -125,7 +134,7 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	case "CONFLICT":
 		return Event{}, failure("REQUEST_CONFLICT", "相同请求编号对应不同内容或场次", false)
 	case "LIMITED":
-		return Event{}, failure("RATE_LIMITED", "每 10 秒最多发送 10 条新弹幕", true)
+		return Event{}, &Fault{Code: "RATE_LIMITED", Message: "每 10 秒最多发送 10 条新弹幕", Retryable: true, RetryAfter: 10000}
 	case "FULL":
 		return Event{}, failure("SERVER_BUSY", "弹幕请求容量已满，请稍后重试", true)
 	case "BUSY":
@@ -136,11 +145,16 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	default:
 		return Event{}, failure("DANMAKU_UNAVAILABLE", "弹幕请求状态无效", true)
 	}
+	defer func() {
+		finish, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = service.Store.Change(finish, candidate, owner, "release", "", "")
+	}()
 	event := candidate
 	if claim[1] != "" {
 		event, err = storedEvent(claim[1], candidate)
 		if err != nil {
-			return Event{}, failure("DANMAKU_UNAVAILABLE", "冻结事件需要核对", true)
+			return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "冻结事件需要核对", Pending: true, Retryable: true, RetryAfter: 2000}
 		}
 	} else {
 		if service.Moderator == nil {

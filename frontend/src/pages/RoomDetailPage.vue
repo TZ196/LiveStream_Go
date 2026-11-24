@@ -4,12 +4,20 @@ import { closeRoom, getRoom, reopenRoom, type Room } from '../api/rooms'
 import { ApiError } from '../api/http'
 import { useRoomLikes } from '../likes'
 import LikeLeaderboard from '../components/LikeLeaderboard.vue'
+import RoomDanmaku from '../components/RoomDanmaku.vue'
+import { useRoomConnection } from '../realtime'
+import { useRoomDanmaku } from '../danmaku'
 
 const props = defineProps<{ token: string; userId: string; roomId: string }>()
 const emit = defineEmits<{ back: []; expired: [] }>()
 const room = ref<Room>()
-const { board, canCollect, likeCount, queuedClicks, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId)
+const channel = useRoomConnection(props.token, props.roomId)
+const danmaku = useRoomDanmaku(props.token, props.userId, props.roomId, channel)
+const { board, canCollect, likeCount, queuedClicks, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId, channel)
 const { rows, mine, onBoard, status: boardStatus } = board
+
+function startRoom() { startLikes(); danmaku.start(); channel.start() }
+function stopRoom() { channel.stop(); stopLikes(); danmaku.stop() }
 const feedback = ref<HTMLSpanElement>()
 let pulse: Animation | undefined
 
@@ -42,7 +50,7 @@ async function loadRoom() {
     const value = await getRoom(props.token, props.roomId, attempt.signal)
     if (attempt.signal.aborted) return
     room.value = value
-    if (value.status === 'OPEN') startLikes(); else stopLikes()
+    if (value.status === 'OPEN') startRoom(); else { stopRoom(); void danmaku.loadHistory(false) }
     confirming.value = false
     needsRefresh.value = false
   } catch (error) {
@@ -67,7 +75,7 @@ async function changeStatus(action: 'close' | 'reopen') {
       : await reopenRoom(props.token, props.roomId, attempt.signal)
     if (!attempt.signal.aborted) {
       room.value = value
-      if (value.status === 'OPEN') startLikes(); else stopLikes()
+      if (value.status === 'OPEN') startRoom(); else { stopRoom(); void danmaku.loadHistory(false) }
     }
   } catch (error) {
     if (attempt.signal.aborted) return
@@ -85,7 +93,7 @@ async function changeStatus(action: 'close' | 'reopen') {
 }
 
 onMounted(() => { void loadRoom() })
-onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopLikes() })
+onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopRoom() })
 </script>
 
 <template>
@@ -105,7 +113,7 @@ onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopLikes() })
         <div><dt>创建时间</dt><dd>{{ formatDate(room.created_at) }}</dd></div>
         <div v-if="room.closed_at"><dt>本次结束时间</dt><dd>{{ formatDate(room.closed_at) }}</dd></div>
       </dl>
-      <p class="account-notice">{{ room.status === 'CLOSED' ? '本次直播已结束，房主可以在这个房间重新开播。' : '房间已开放，欢迎点赞。' }}</p>
+      <p class="account-notice">{{ room.status === 'CLOSED' ? '本次直播已结束，房主可以在这个房间重新开播。' : '房间已开放，可以发送弹幕和点赞。' }}</p>
       <div v-if="room.status === 'OPEN'" class="room-actions">
         <button class="retry-button like-button" type="button" :disabled="!canCollect || full" @click="clickLike">
           点赞<span ref="feedback" class="like-feedback" aria-hidden="true">+1</span>
@@ -115,6 +123,7 @@ onBeforeUnmount(() => { controller?.abort(); pulse?.cancel(); stopLikes() })
       </div>
       <p v-if="likeNotice" role="status">{{ likeNotice }}</p>
       <LikeLeaderboard v-if="room.status === 'OPEN'" :rows="rows" :mine="mine" :on-board="onBoard" :status="boardStatus" :user-id="userId" />
+      <RoomDanmaku :state="danmaku" :open="room.status === 'OPEN'" />
       <div v-if="room.owner_id === userId" class="room-close">
         <button v-if="room.status === 'CLOSED'" class="retry-button" type="button" :disabled="busy || needsRefresh" @click="changeStatus('reopen')">重新开播</button>
         <button v-else-if="!confirming" class="retry-button danger-button" type="button" :disabled="busy || needsRefresh" @click="confirming = true">结束直播</button>

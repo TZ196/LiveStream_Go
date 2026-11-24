@@ -136,8 +136,9 @@ func TestLikeDependencyRecoveryIntegration(t *testing.T) {
 }
 
 type apiSocket struct {
-	conn   *websocket.Conn
-	frames chan observedFrame
+	conn    *websocket.Conn
+	frames  chan observedFrame
+	initial observedFrame
 }
 
 // apiRequest 只操作显式指定的隔离 API，错误输出仅包含状态码，避免输出登录凭证。
@@ -222,7 +223,7 @@ func apiConnect(t *testing.T, token, roomID, expectedCount string) (*apiSocket, 
 		t.Fatal("重连首帧或 Redis 权威首屏不符合预期")
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(45 * time.Second))
-	socket := &apiSocket{conn: conn, frames: make(chan observedFrame, 512)}
+	socket := &apiSocket{conn: conn, frames: make(chan observedFrame, 512), initial: initial}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -173,3 +173,44 @@ func (store *RequestStore) Uncertain(timestamp int64) bool {
 	defer store.mu.RUnlock()
 	return store.cutoff > 0 && timestamp <= store.cutoff
 }
+
+// ValidateRealtime 只核对本业务的 Topic 与处理位置；广播没有需要重算的点赞数。
+func (store *RequestStore) ValidateRealtime(ctx context.Context, topicID string, committed map[int32]int64) error {
+	identity := "danmaku:realtime:topic"
+	if err := store.client.SetNX(ctx, identity, topicID, 0).Err(); err != nil {
+		return err
+	}
+	actual, err := store.client.Get(ctx, identity).Result()
+	if err != nil {
+		return err
+	}
+	if actual != topicID {
+		return ErrBlocked
+	}
+	for partition, offset := range committed {
+		raw, err := store.client.HGet(ctx, "danmaku:realtime:"+topicID, strconv.Itoa(int(partition))).Result()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		saved, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || saved < 0 || (offset < 0 && saved > 0) {
+			return ErrBlocked
+		}
+	}
+	return nil
+}
+
+var markRealtime = redis.NewScript(`
+local current=redis.call('HGET',KEYS[1],ARGV[1])
+local next=ARGV[2]
+if current and not string.match(current,'^%d+$') then return redis.error_reply('INVALID_POSITION') end
+if not current or #next>#current or (#next==#current and next>current) then redis.call('HSET',KEYS[1],ARGV[1],next) end
+return 1
+`)
+
+func (store *RequestStore) MarkRealtime(ctx context.Context, record Record) error {
+	return markRealtime.Run(ctx, store.client, []string{"danmaku:realtime:" + record.TopicID}, strconv.Itoa(int(record.Partition)), strconv.FormatInt(record.NextOffset, 10)).Err()
+}

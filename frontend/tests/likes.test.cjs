@@ -45,7 +45,7 @@ function environment(t) {
       })
     }
     snapshot() {
-      this.frame({ type: 'ROOM_STATE', data: { session_id: server.session, projection_epoch: 'epoch', likes_available: true, like_count: server.count.toString(), likes_revision: '0' } })
+      this.frame({ type: 'ROOM_STATE', data: { session_id: server.session, projection_epoch: server.epoch ?? 'epoch', projection_generation: server.generation ?? '1', likes_available: server.state === 'READY', like_count: server.count.toString(), likes_revision: '0' } })
     }
     frame(message) { this.onmessage?.({ data: JSON.stringify(message) }) }
     send(raw) {
@@ -77,6 +77,7 @@ test('恢复期间持续采集，刷新后仍可自动补发', async t => {
   likes = create(); likes.start(); await settle()
   assert.equal(likes.queuedClicks.value, '130')
   server.state = 'READY'
+  server.sockets.at(-1)?.snapshot()
   t.mock.timers.tick(2000); await settle(); t.mock.timers.tick(0); await settle()
   assert.equal(server.count, 130n)
   assert.equal(likes.queuedClicks.value, '0')
@@ -149,4 +150,54 @@ test('本地缓存无法解析时保留原记录并提示', async t => {
   likes.like()
   assert.equal(storage.get('livestream.likes.1.1.1'), '{broken-record')
   assert.match(likes.notice.value, /无法保存/)
+})
+
+test('点赞恢复不关闭共享连接，仍然保留点击', async t => {
+  const { server, create } = environment(t)
+  server.state = 'READY'
+  const likes = create(); likes.start(); await settle()
+  const socket = server.sockets.at(-1)
+  server.state = 'RECOVERING'
+  socket.frame({ type: 'LIKES_UNAVAILABLE', data: {} })
+  assert.equal(socket.readyState, WebSocket.OPEN)
+  assert.equal(likes.like(), true)
+  t.mock.timers.tick(500); await settle()
+  assert.equal(server.sent.length, 0)
+  server.state = 'READY'; socket.snapshot()
+  t.mock.timers.tick(0); await settle()
+  assert.equal(server.count, 1n)
+  assert.equal(server.sockets.length, 1)
+})
+
+test('同连接切换投影后拒绝旧代次快照和点赞更新', async t => {
+  const { server, create } = environment(t)
+  server.state = 'READY'
+  const likes = create(); likes.start(); await settle()
+  const socket = server.sockets.at(-1)
+  server.epoch = 'new-epoch'; server.generation = '2'; server.count = 12n
+  socket.snapshot()
+  socket.frame({ type: 'LIKE_UPDATE', data: { session_id: '1', projection_epoch: 'epoch', likes_revision: '999', like_count: '999' } })
+  socket.frame({ type: 'ROOM_STATE', data: { session_id: '1', projection_epoch: 'epoch', projection_generation: '1', likes_available: true, likes_revision: '999', like_count: '999' } })
+  assert.equal(likes.likeCount.value, '12')
+})
+
+test('同连接能力快照不重置点赞有限重试次数', async t => {
+  const { server, create } = environment(t)
+  server.state = 'READY'; server.ack = false
+  const likes = create(); likes.start(); await settle()
+  likes.like(); t.mock.timers.tick(500); await settle()
+  for (let i = 0; i < 8; i++) { server.sockets.at(-1).snapshot(); t.mock.timers.tick(3000); await settle() }
+  assert.equal(server.sent.length, 5)
+  assert.equal(likes.queuedClicks.value, '1')
+})
+
+test('服务进程重启后新连接可以采用较小的本地投影代次', async t => {
+  const { server, create } = environment(t)
+  server.state = 'READY'; server.generation = '9'; server.count = 12n
+  const likes = create(); likes.start(); await settle()
+  assert.equal(likes.likeCount.value, '12')
+  likes.stop()
+  server.generation = '1'; server.epoch = 'restart-epoch'; server.count = 15n
+  likes.start(); await settle()
+  assert.equal(likes.likeCount.value, '15')
 })

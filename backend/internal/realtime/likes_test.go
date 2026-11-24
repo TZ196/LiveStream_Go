@@ -12,6 +12,7 @@ import (
 // TestLikeReplayAfterLockTimeout 覆盖 Redis 已计数但内存同步超时后的重复投递。
 func TestLikeReplayAfterLockTimeout(t *testing.T) {
 	manager := NewManager(nil, nil, nil, nil, nil, "test")
+	t.Cleanup(func() { manager.dispatchCancel(); manager.dispatchWait.Wait() })
 	manager.SetAvailable(true)
 	client := manager.newConnection(nil)
 	view := manager.register(1, 2, "3", client)
@@ -48,6 +49,7 @@ func TestLikeReplayAfterLockTimeout(t *testing.T) {
 // TestSlowConnectionIsolation 验证满队列先逻辑关闭，其余连接与其他忙场次独立分发。
 func TestSlowConnectionIsolation(t *testing.T) {
 	manager := NewManager(nil, nil, nil, nil, nil, "test")
+	t.Cleanup(func() { manager.dispatchCancel(); manager.dispatchWait.Wait() })
 	manager.SetAvailable(true)
 	slow := manager.newConnection(nil)
 	healthy := manager.newConnection(nil)

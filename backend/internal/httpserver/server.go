@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
+	"github.com/TZ196/LiveStream_Go/backend/internal/danmaku"
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
 	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
@@ -35,6 +36,7 @@ type Server struct {
 	rooms    *room.Service
 	tokens   *user.Tokens
 	realtime *realtime.Manager
+	danmaku  *danmaku.Repository
 	wsOrigin string
 	limit    *authLimiter
 	// 请求处理和退出流程会同时访问状态，使用原子变量避免并发读写冲突。
@@ -108,6 +110,7 @@ type readinessResponse struct {
 	Stage        string            `json:"stage"`
 	Dependencies map[string]string `json:"dependencies"`
 	Recovery     string            `json:"recovery"`
+	Danmaku      string            `json:"danmaku"`
 }
 
 // readiness 根据生命周期和数据库检查结果返回 200 或 503。
@@ -156,6 +159,10 @@ func (s *Server) readiness(ctx context.Context, c *app.RequestContext) {
 		Stage:        stage,
 		Dependencies: dependencies,
 		Recovery:     recovery,
+		Danmaku:      "DISABLED",
+	}
+	if s.realtime != nil {
+		response.Danmaku = s.realtime.DanmakuState()
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(statusCode, response)

@@ -113,6 +113,7 @@ type Record struct {
 	Partition  int32
 	NextOffset int64
 	ProducedAt time.Time
+	ReceivedAt time.Time
 }
 
 // DecodeRecord 只校验冻结事件，不以当前词库重新裁定已经接受的旧消息。
@@ -144,5 +145,13 @@ func DecodeRecord(raw *kgo.Record, topicID string) (Record, error) {
 	if event.SchemaVersion != 1 || event.EventType != "DANMAKU_SENT" || event.EventID != expected.EventID || event.RequestHash != expected.RequestHash || event.Timestamp != expected.Timestamp || string(raw.Key) != event.Key() {
 		return Record{}, fmt.Errorf("%w: 事件外壳、时间、指纹或分区键不匹配", ErrConflict)
 	}
-	return Record{Event: event, TopicID: topicID, Partition: raw.Partition, NextOffset: raw.Offset + 1, ProducedAt: raw.Timestamp}, nil
+	var received time.Time
+	for _, header := range raw.Headers {
+		if header.Key == "api_received_at_ns" {
+			if nanos, err := strconv.ParseInt(string(header.Value), 10, 64); err == nil && nanos > 0 {
+				received = time.Unix(0, nanos)
+			}
+		}
+	}
+	return Record{ReceivedAt: received, Event: event, TopicID: topicID, Partition: raw.Partition, NextOffset: raw.Offset + 1, ProducedAt: raw.Timestamp}, nil
 }

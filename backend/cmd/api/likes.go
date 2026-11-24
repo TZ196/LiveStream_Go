@@ -8,17 +8,14 @@ import (
 	"time"
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/config"
-	"github.com/TZ196/LiveStream_Go/backend/internal/httpserver"
 	"github.com/TZ196/LiveStream_Go/backend/internal/likes"
 	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
-	"github.com/TZ196/LiveStream_Go/backend/internal/room"
-	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
-// startLikes 先注册路由，再在后台检查与恢复；Redis 故障不阻止普通 HTTP 服务启动。
-func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *httpserver.Server, logger *slog.Logger) (func(), error) {
+// startLikes 只组装点赞依赖并启动检查/恢复，共享连接由 API main 管理。
+func startLikes(parent context.Context, db *gorm.DB, manager *realtime.Manager, logger *slog.Logger) (func(), error) {
 	cfg, err := config.LoadLikes()
 	if err != nil {
 		return nil, err
@@ -37,8 +34,7 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 		_ = redisClient.Close()
 		return nil, err
 	}
-	manager := realtime.NewManager(rooms, producer, initial, likes.NewProjectionInitializer(db, initial), user.NewRepository(db), cfg.ProjectionEpoch)
-	api.EnableRealtime(manager, cfg.WSOrigin)
+	manager.ConfigureLikes(producer, initial, likes.NewProjectionInitializer(db, initial))
 	recovery := likes.NewRecovery(db, redisClient, cfg.Brokers, cfg.ProjectionEpoch)
 	ctx, stop := context.WithCancel(parent)
 	var wait sync.WaitGroup
@@ -48,7 +44,6 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 	go func() { defer wait.Done(); runRealtimeConsumer(ctx, cfg, recovery, producer, manager, logger) }()
 	return func() {
 		stop()
-		manager.Close()
 		wait.Wait()
 		producer.Close()
 		_ = redisClient.Close()
@@ -57,7 +52,6 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 
 // runRealtimeConsumer 串行管理检查、必要的重建和消费，不运行多个恢复任务。
 func runRealtimeConsumer(ctx context.Context, cfg config.Likes, recovery *likes.Recovery, producer *likes.Producer, manager *realtime.Manager, logger *slog.Logger) {
-	defer manager.Close()
 	for ctx.Err() == nil {
 		manager.Pause("CHECKING")
 		check, cancel := context.WithTimeout(ctx, 30*time.Second)
