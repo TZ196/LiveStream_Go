@@ -46,5 +46,8 @@ func (producer *Producer) PublishLike(ctx context.Context, event LikeEvent) erro
 // Close 等待未完成的发送并关闭客户端；调用方应先停止接收新请求。
 func (producer *Producer) Close() { producer.client.Close() }
 
+// Drain 在停止准入后等待已提交到客户端的发送，包含结果尚未确认的发送。
+func (producer *Producer) Drain(ctx context.Context) error { return producer.client.Flush(ctx) }
+
 // Ping 检查 Producer 是否能连接 Kafka Broker。
 func (producer *Producer) Ping(ctx context.Context) error { return producer.client.Ping(ctx) }

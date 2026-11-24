@@ -11,12 +11,12 @@
 | internal/httpserver | Hertz 路由、参数校验、认证和响应，middleware.go 包含访问日志与登录限流 |
 | internal/user | 注册登录、密码、用户查询及 token.go 中的 JWT 身份 |
 | internal/room | 房间权限、开关播、独立场次与数据库事务 |
-| internal/likes | event.go 的事件规则，kafka_*.go 的收发和消费组，projection.go 的 Redis 总数、个人数和榜单，persistence.go 的 MySQL 事务，initializer.go 的初始化与检查，backfill.go 的补榜 |
+| internal/likes | event.go 的事件规则，kafka_*.go 的收发和消费组，projection.go 的 Redis 总数、个人数和榜单，persistence.go 的 MySQL 事务，initializer.go 的初始化与检查，recovery.go 的一次性检查/重建，backfill.go 的补榜 |
 | internal/realtime | manager.go 的握手和读循环，audience.go 的场次状态与锁，delivery.go 的队列和写循环，like_updates.go 与 leaderboard.go 的分发，票据与送达指标 |
 | internal/config、database、logging | 配置读取、GORM 连接池及结构检查、应用与框架日志 |
 | configs、migrations | 无秘密的配置样例，各版本数据库迁移及调度 |
 
-日常启动入口为 `go run ./cmd/api` 和 `go run ./cmd/worker`，先按[运行说明](../docs/deployment.md)配置环境和执行迁移。`bin/` 是可重新构建的本地输出目录。当前有 8 个 internal 包、44 个非测试 Go 文件。
+日常启动入口为 `go run ./cmd/api` 和 `go run ./cmd/worker`，先按[运行说明](../docs/deployment.md)配置环境和执行迁移。`bin/` 是可重新构建的本地输出目录。内部包保持 8 个；恢复实现集中在 likes，新增 Migration 只保存有效投影代次。
 
 ## 模块依赖
 
@@ -49,6 +49,6 @@ database → config、GORM/MySQL
 
 Kafka 发布超时保留结果未确认，客户端重试原始请求。消费处理失败时本组停止拉取，回收在途成员，核对 Topic 身份和存储检查点后重建组。另一消费组独立运行。
 
-Redis 已更新而内存等锁超时，会保留未提交的 Kafka 位置。重放通过事件标记取得当前计数，再补齐在线快照。身份、场次投影或进度缺失时进入恢复保护，已有数据的完整重建继续按[恢复设计](../docs/design/reliability.md#redis-丢失后的恢复步骤)实施。backfill-like-board 处理的是已有投影的历史榜单补建。
+Redis 已更新而内存等锁超时，会保留未提交的 Kafka 位置。重放通过事件标记取得当前计数，再补齐在线快照。正常重启逐分区检查计数、榜单和去重依据，保留完整数据。身份、场次投影或进度缺失时停止后端接收，Worker 追平后按[恢复设计](../docs/design/reliability.md#redis-丢失后的恢复步骤)在新代次重建。前端持续采集并暂存，取得同场首屏后补发。backfill-like-board 处理的是已有投影的历史榜单补建。
 
-MySQL 事务失败时 inbox、事件和检查点一起回滚，重试依靠原事件身份去重。事务已成功而 Kafka 提交失败时可重新读取。当前异常事件持久隔离、Redis 全量重建及关房在途完成屏障的进度见[项目状态](../docs/status.md)，实际验证见[本轮报告](../docs/verification/reports/backend-refactor.md)。
+MySQL 事务失败时 inbox、事件和检查点一起回滚，重试依靠原事件身份去重。事务已成功而 Kafka 提交失败时可重新读取。恢复不建立任务表或断点续建；点赞状态独立于普通 API 就绪。当前异常事件持久隔离及关房在途完成屏障的进度见[项目状态](../docs/status.md)，实际验证见[本轮报告](../docs/verification/reports/backend-refactor.md)。

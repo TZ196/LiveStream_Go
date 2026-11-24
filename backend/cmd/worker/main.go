@@ -55,13 +55,14 @@ func run() error {
 		consumer, consumerErr := likes.OpenConsumerGroup(check, likesConfig.Brokers, "live-persistence", likesConfig.PersistenceConsumers, repository.ValidatePersistenceStartup)
 		checkCancel()
 		if consumerErr == nil {
+			slog.Info("persistence_consumer_running", "state", "RUNNING")
 			consumerErr = consumer.Run(ctx, repository.PersistLike)
 			consumer.Close()
 		}
 		if ctx.Err() != nil {
 			return nil
 		}
-		slog.Error("persistence_consumer_paused", "error", consumerErr)
+		slog.Error("persistence_consumer_paused", "state", "PAUSED", "error", consumerErr)
 		select {
 		case <-ctx.Done():
 			return nil

@@ -1,4 +1,5 @@
 local meta, users, top = unpack(KEYS)
+check_instance(ARGV[4])
 if redis.call('HGET', meta, 'initialized') ~= '1' or redis.call('HGET', meta, 'room_id') ~= ARGV[1] then error('SESSION_MISMATCH') end
 local version, revision = check_board(meta, users, top)
 local personal = redis.call('HGET', users, ARGV[2]) or '0'

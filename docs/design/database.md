@@ -1,6 +1,6 @@
 # LiveStream 数据模型与存储设计
 
-基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms、live_sessions、点赞事件、去重、检查点和投影初始化标记；弹幕历史及完整恢复表仍为后续设计；实际执行结果见 [项目状态](../status.md)。
+基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms、live_sessions、点赞事件、去重、检查点和投影初始化标记；点赞恢复采用简单有效代次记录，弹幕历史及异常隔离仍为后续设计；实际执行结果见 [项目状态](../status.md)。
 
 ## 通用约定
 
@@ -44,9 +44,9 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 | consumer_inbox | event_id、event_type、request_id、request_hash、room_id、session_id、user_id、event_time、event_json JSON、first_topic_id、first_partition、first_offset、persisted_at | PRIMARY(event_id)；UNIQUE(user_id,request_id)；(event_time,event_id)；保存事件身份与完整冻结事件，支持跨业务表去重及恢复 |
 | worker_checkpoints | consumer_group、topic_id、partition_id、next_offset BIGINT、updated_at | PRIMARY(consumer_group,topic_id,partition_id)；与本分区业务事务一起推进；不允许回退 |
 | failed_events | topic_id、partition_id、offset、raw_key、raw_payload MEDIUMBLOB、payload_hash、error_code、error_message、status、resolution_details、attempts、first_failed_at、resolved_at 可空 | PRIMARY(topic_id,partition_id,offset)；status 为 OPEN/RESOLVED；保存不超过 64 KiB 的原始值；(status,first_failed_at) 用于处置 |
-| projection_rebuilds | epoch UUID、topic_id、barrier_offsets JSON、status、started_at、completed_at 可空、reason | PRIMARY(epoch)；status 为 PREPARING/READY/FAILED；记录恢复屏障和切换状态 |
+| projection_state | id=1、epoch UUID、topic_id UUID | 单行主键与 CHECK(id=1)；保存成功启用的投影代次，不存恢复任务、屏障或执行阶段 |
 
-点赞消费所需 inbox、检查点和 interaction_events 随 P4 建立；弹幕历史、隔离与完整恢复表按 P5/P6 交付。其中 consumer_inbox、worker_checkpoints 已随版本 4 建立，字段以实际迁移为准；failed_events、projection_rebuilds 仍未实现。consumer_inbox 的 event_json 不包含密码、令牌或票据。未知事件保留原始载荷并限制错误摘要长度，禁止将任意大异常或堆栈无限写入。
+点赞消费所需 inbox、检查点和 interaction_events 随 P4 建立；弹幕历史与隔离按 P5/P6 交付。其中 consumer_inbox、worker_checkpoints 已随版本 4 建立，字段以实际迁移为准；projection_state 随版本 6 建立，failed_events 尚未实现。consumer_inbox 的 event_json 不包含密码、令牌或票据。未知事件保留原始载荷并限制错误摘要长度，禁止将任意大异常或堆栈无限写入。
 
 隔离记录的 RESOLVED 表示已完成原事件持久化，或经单独人工决策处理了无效记录；resolution_details 必须记录处理方式、依据和是否存在业务损失。合法事件被丢弃仍属于数据不完整，不能据此通过无损恢复验收。不得靠改状态掩盖业务未处理。
 
@@ -62,8 +62,7 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 
 | 逻辑键 | 类型与内容 | 生命周期 |
 | --- | --- | --- |
-| projection:active | String，当前 epoch | 不过期，恢复完成后切换 |
-| projection:{epoch}:meta | Hash，READY 状态、topic 身份 | 不过期；恢复期间新代不对外启用 |
+| projection:{epoch}:identity | String，Topic UUID 与检查通过的 Redis run_id | 不过期；运行编号变化触发数据核验，成功后重新登记 |
 | projection:{epoch}:session:{session_id} | Hash，room_id、likes、revision、initialized 及榜单校验字段 board_users、board_revision、board_through | 不过期；已结束场次也保留；场次身份需从权威数据校验 |
 | projection:{epoch}:session:{session_id}:users | Hash，user_id 映射到本场个人累计点击数，含全部点赞者 | 不过期，空榜不占键 |
 | projection:{epoch}:session:{session_id}:top | ZSET，保存排在最前的至多 100 人 | 不过期，空榜不占键 |
@@ -90,7 +89,7 @@ board_users 记录参与人数，board_through 记录已处理至哪个场次版
 
 初始准入保护在 Redis 使用量达到 maxmemory 的 70% 时告警，80% 时拒绝新业务，并给已接受事件处理预留空间。具体 maxmemory 在 P4 按机器预算设置；全量重建前另行验证新旧两代键同时存在所需的内存，资源不足时保持停写，不能边建边淘汰。
 
-V1 MySQL 业务历史不自动清理。Redis 旧 epoch 仅在恢复验证、切换成功并保留诊断记录后受控清理。缩短任何 TTL 或保留期前，重新验证可靠性窗口。
+V1 MySQL 业务历史不自动清理。Redis 重建写入新 epoch，成功后将有效代次存入 MySQL projection_state。旧 epoch 保留供核对，后续受控清理。恢复只针对当前单 API/Worker，不提供中途断电续建或任务接管。缩短任何 TTL 或保留期前，重新验证可靠性窗口。
 
 ## 迁移与版本
 
@@ -108,7 +107,7 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
-独立迁移命令依次补齐版本 1–5。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5 迁移，已有点赞投影时先完成[本场榜单补建](../deployment.md#已有点赞数据升级到本场榜单)，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
+独立迁移命令依次补齐版本 1–6。版本 6 仅新增 projection_state 空表，首次启用点赞时兼容现有固定配置代次，随后按数据库有效代次启动。升级前停止旧进程并备份；该版本不改写业务数据。旧程序要求版本 5，升级后应使用新版本并以前向修复处理故障。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5、6 迁移，已有点赞投影时先完成[本场榜单补建](../deployment.md#已有点赞数据升级到本场榜单)，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
 
 命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
 
@@ -116,6 +115,6 @@ MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体�
 
 当前 API 和 Worker 要求成功记录连续且最新版本恰好为 5，并检查用户、房间、场次和点赞相关表及 click_count 列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
 
-按 P1b 用户、P2 房间、P3 场次、P4 点赞事件、P6 恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/schema.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
+按 P1b 用户、P2 房间、P3 场次、P4 点赞事件、P6 恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/mysql.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
 
 API 和 Worker 正常启动只校验所需迁移版本，不隐含执行删表、清库或重建；Migration 与开发数据清理有独立入口和明确操作说明。重启前后已有数据及迁移版本应保持，按 [ENV-03](../verification/plan.md) 逐阶段验证。该约束对应参考项目启动删表问题，证据见 [ISSUE-01](../reviews/live-stream-danmaku-review.md)。

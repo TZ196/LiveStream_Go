@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -17,7 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// startLikes 可选启动实时消费和 WebSocket；返回的关闭函数等待后台任务结束。
+// startLikes 先注册路由，再在后台检查与恢复；Redis 故障不阻止普通 HTTP 服务启动。
 func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *httpserver.Server, logger *slog.Logger) (func(), error) {
 	cfg, err := config.LoadLikes()
 	if err != nil {
@@ -31,43 +31,21 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 		return nil, err
 	}
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
-	startup, cancel := context.WithTimeout(parent, 5*time.Second)
-	defer cancel()
-	if err = redisClient.Ping(startup).Err(); err != nil {
-		producer.Close()
-		_ = redisClient.Close()
-		return nil, fmt.Errorf("连接 Redis: %w", err)
-	}
-	projection, err := likes.NewProjectionRepository(redisClient, cfg.ProjectionEpoch)
+	initial, err := likes.NewProjectionRepository(redisClient, cfg.ProjectionEpoch)
 	if err != nil {
 		producer.Close()
 		_ = redisClient.Close()
 		return nil, err
 	}
-	initializer := likes.NewProjectionInitializer(db, projection)
-	consumer, err := likes.OpenConsumerGroup(startup, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
-	if err != nil {
-		producer.Close()
-		_ = redisClient.Close()
-		return nil, fmt.Errorf("实时投影检查: %w", err)
-	}
-	manager := realtime.NewManager(rooms, producer, projection, initializer, user.NewRepository(db), cfg.ProjectionEpoch)
+	manager := realtime.NewManager(rooms, producer, initial, likes.NewProjectionInitializer(db, initial), user.NewRepository(db), cfg.ProjectionEpoch)
 	api.EnableRealtime(manager, cfg.WSOrigin)
-	manager.SetAvailable(true)
+	recovery := likes.NewRecovery(db, redisClient, cfg.Brokers, cfg.ProjectionEpoch)
 	ctx, stop := context.WithCancel(parent)
 	var wait sync.WaitGroup
 	wait.Add(3)
 	go func() { defer wait.Done(); manager.RunLeaderboard(ctx) }()
-	go func() {
-		defer wait.Done()
-		manager.RunLikeUpdates(ctx)
-		// 先终止长连接读循环，Hertz 才能在关闭预算内回收升级后的请求。
-		manager.Close()
-	}()
-	go func() {
-		defer wait.Done()
-		runRealtimeConsumer(ctx, cfg, consumer, initializer, projection, manager, logger)
-	}()
+	go func() { defer wait.Done(); manager.RunLikeUpdates(ctx) }()
+	go func() { defer wait.Done(); runRealtimeConsumer(ctx, cfg, recovery, producer, manager, logger) }()
 	return func() {
 		stop()
 		manager.Close()
@@ -77,39 +55,97 @@ func startLikes(parent context.Context, db *gorm.DB, rooms *room.Service, api *h
 	}, nil
 }
 
-// runRealtimeConsumer 持有整组消费者，出错后先回收在途任务，再复查投影并重建全组。
-func runRealtimeConsumer(ctx context.Context, cfg config.Likes, consumer *likes.ConsumerGroup, initializer *likes.ProjectionInitializer, projection *likes.ProjectionRepository, manager *realtime.Manager, logger *slog.Logger) {
-	current := consumer
-	for {
+// runRealtimeConsumer 串行管理检查、必要的重建和消费，不运行多个恢复任务。
+func runRealtimeConsumer(ctx context.Context, cfg config.Likes, recovery *likes.Recovery, producer *likes.Producer, manager *realtime.Manager, logger *slog.Logger) {
+	defer manager.Close()
+	for ctx.Err() == nil {
+		manager.Pause("CHECKING")
+		check, cancel := context.WithTimeout(ctx, 30*time.Second)
+		projection, initializer, err := recovery.Check(check)
+		cancel()
+		if errors.Is(err, likes.ErrProjectionRecovery) {
+			manager.Pause("RECOVERING")
+			rebuild, finish := context.WithTimeout(ctx, 2*time.Minute)
+			err = producer.Drain(rebuild)
+			if err == nil {
+				projection, initializer, err = recovery.Rebuild(rebuild)
+			}
+			finish()
+			if err == nil {
+				logger.Info("likes_projection_rebuilt", "epoch", projection.Epoch())
+			}
+		}
+		if err == nil {
+			startup, finish := context.WithTimeout(ctx, 10*time.Second)
+			var consumer *likes.ConsumerGroup
+			consumer, err = likes.OpenConsumerGroup(startup, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
+			finish()
+			if err == nil {
+				manager.UseProjection(projection, initializer)
+				logger.Info("likes_ready", "epoch", projection.Epoch())
+				err = consumeWhileHealthy(ctx, consumer, initializer, projection, producer, manager)
+				consumer.Close()
+			}
+		}
 		if ctx.Err() != nil {
-			current.Close()
 			return
 		}
-		err := current.Run(ctx, func(ctx context.Context, record likes.ConsumedLike) error {
-			return processLike(ctx, record, initializer, projection, manager)
+		state := "RECOVERING"
+		if errors.Is(err, likes.ErrRecoveryBlocked) {
+			state = "BLOCKED"
+		}
+		manager.Pause(state)
+		logger.Error("likes_paused", "state", state, "error", err)
+		// 非法事件不能靠反复重开消费组跳过，修复后重新启动 API 再检查。
+		if errors.Is(err, likes.ErrRecoveryBlocked) {
+			<-ctx.Done()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// consumeWhileHealthy 也检测无新事件时的 Redis 重启；计数 Lua 会原子拒绝旧实例编号。
+func consumeWhileHealthy(ctx context.Context, consumer *likes.ConsumerGroup, initializer *likes.ProjectionInitializer, projection *likes.ProjectionRepository, producer *likes.Producer, manager *realtime.Manager) error {
+	consuming, cancel := context.WithCancel(ctx)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- consumer.Run(consuming, func(recordCtx context.Context, record likes.ConsumedLike) error {
+			return processLike(recordCtx, record, initializer, projection, manager)
 		})
-		current.Close()
-		if ctx.Err() != nil {
-			return
-		}
-		manager.SetAvailable(false)
-		logger.Error("realtime_consumer_paused", "error", err)
-		manager.BroadcastUnavailable()
-		for ctx.Err() == nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-			check, cancel := context.WithTimeout(ctx, 10*time.Second)
-			next, createErr := likes.OpenConsumerGroup(check, cfg.Brokers, "live-realtime", cfg.RealtimeConsumers, initializer.ValidateProjectionStartup)
+	}()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-result:
+			return err
+		case <-ctx.Done():
+			manager.Pause("RECOVERING")
 			cancel()
-			if createErr == nil {
-				current = next
-				manager.Resume()
-				break
+			<-result
+			return ctx.Err()
+		case <-ticker.C:
+			check, finish := context.WithTimeout(ctx, time.Second)
+			err := projection.CheckInstance(check)
+			if err == nil {
+				err = producer.Ping(check)
 			}
-			logger.Error("realtime_consumer_waiting", "error", createErr)
+			finish()
+			if err == nil && !manager.Available() {
+				err = likes.ErrProjectionRecovery
+			}
+			if err != nil {
+				manager.Pause("RECOVERING")
+				cancel()
+				<-result
+				return err
+			}
 		}
 	}
 }

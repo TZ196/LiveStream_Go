@@ -1,3 +1,11 @@
+-- 在同一脚本内检查实例，防止 Redis 在线重启后未经核验就推进 Kafka 位移。
+local function check_instance(expected)
+  if expected and expected ~= '' then
+    local actual = string.match(redis.call('INFO', 'server'), 'run_id:([^%s]+)')
+    if actual ~= expected then error('REDIS_RESTARTED') end
+  end
+end
+
 -- 总数与个人计数始终以十进制字符串保存，Lua 的浮点数只用来计算单个十进制位。
 local function add_count(left, right)
   if not string.match(left, '^%d+$') or not string.match(right, '^%d+$') then error('INVALID_COUNT') end

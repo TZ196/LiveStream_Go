@@ -37,6 +37,23 @@ func OpenConsumerGroup(ctx context.Context, brokers []string, name string, size 
 	for {
 		offsets, err := first.CommittedOffsets(ctx)
 		if err == nil {
+			starts, rangeErr := first.logOffsets(ctx, -2)
+			if rangeErr == nil {
+				var ends map[int32]int64
+				ends, rangeErr = first.logOffsets(ctx, -1)
+				if rangeErr == nil {
+					for partition, offset := range offsets {
+						if max(offset, 0) < starts[partition] || offset > ends[partition] {
+							rangeErr = fmt.Errorf("%w: %s 分区 %d 的消费位置超出保留日志范围", ErrRecoveryBlocked, name, partition)
+							break
+						}
+					}
+				}
+			}
+			if rangeErr != nil {
+				group.Close()
+				return nil, rangeErr
+			}
 			err = validate(ctx, first.TopicID(), offsets)
 			if err == nil {
 				return group, nil

@@ -72,7 +72,7 @@ func (manager *Manager) QueueLikeUpdate(ctx context.Context, event likes.LikeEve
 			view.pendingSince.Store(&now)
 		}
 		view.pending = &likeUpdate{RoomID: event.RoomID, SessionID: event.SessionID,
-			Count: projection.Count, Revision: projection.Revision, Epoch: manager.epoch}
+			Count: projection.Count, Revision: projection.Revision, Epoch: manager.current.Load().epoch}
 	}
 	view.mu.Unlock()
 	if changed {
