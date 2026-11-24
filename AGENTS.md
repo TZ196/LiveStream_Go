@@ -79,7 +79,7 @@
 
 ## Kafka Redis 与一致性
 
-- Kafka 阶段使用 `live.events` 和 `live-realtime`、`live-persistence` 两个独立消费组；弹幕按 `room_id`、点赞按 `room_id:event_id` 分区，细节以 Kafka 设计为准。变更分区数或 Key 算法前说明兼容影响。
+- 点赞使用 `live.events` 和 `live-realtime`、`live-persistence`；弹幕独立使用 `live.danmaku` 和 `danmaku-realtime`、`danmaku-persistence`。弹幕按 `room_id:user_id`、点赞按 `room_id:event_id` 分区；同用户同房间保留分区日志顺序，不承诺跨用户全局顺序，细节以 Kafka 设计为准。变更分区数或 Key 算法前说明兼容影响。
 - 实时消费者在持有 RoomHub 的 API Server 内处理广播；Worker 负责持久化。Producer 获得 Broker 确认后才发送接受确认，该确认不代表所有客户端已收到或数据库已经落盘。
 - 区分客户端 `request_id` 与服务端 `event_id`。请求重试、生产重试、消费重放和客户端重复接收分别设计，不能只靠 Producer 幂等解决全部重复问题。
 - Worker 在对应数据库事务成功后提交 Kafka 位移；同一分区并行处理时，不跨过尚未完成的消息提交更高位移。

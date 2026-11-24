@@ -74,7 +74,7 @@ func Close(db *gorm.DB) error {
 }
 
 // RequiredSchemaVersion 是当前程序需要的结构版本，新增迁移时同步更新。
-const RequiredSchemaVersion uint64 = 6
+const RequiredSchemaVersion uint64 = 7
 
 // CurrentVersion 读取成功记录，拒绝缺号、重复或从零开始的异常历史。
 func CurrentVersion(ctx context.Context, db *gorm.DB) (uint64, error) {
@@ -130,10 +130,13 @@ func CheckSchema(ctx context.Context, db *gorm.DB) error {
 	if err = rows.Err(); err != nil {
 		return fmt.Errorf("读取 live_rooms 表检查结果失败: %w", err)
 	}
-	for _, table := range []string{"live_sessions", "consumer_inbox", "interaction_events", "projection_sessions", "worker_checkpoints", "projection_state"} {
+	for _, table := range []string{"live_sessions", "consumer_inbox", "interaction_events", "projection_sessions", "worker_checkpoints", "projection_state", "danmaku_messages"} {
 		columns := "*"
 		if table == "interaction_events" {
 			columns = "click_count"
+		}
+		if table == "danmaku_messages" {
+			columns = "event_id,request_id,request_hash,user_id,username,room_id,session_id,content,moderation_version,created_at,persisted_at"
 		}
 		if table == "projection_state" {
 			columns = "id,epoch,topic_id"

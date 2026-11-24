@@ -77,7 +77,10 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic live.events --partitions 16 --replication-factor 1 --config retention.ms=604800000 --config max.message.bytes=65536
+      - |
+        set -e
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic live.events --partitions 16 --replication-factor 1 --config retention.ms=604800000 --config max.message.bytes=65536
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic live.danmaku --partitions 16 --replication-factor 1 --config retention.ms=604800000 --config max.message.bytes=65536
     restart: "no"
 
 volumes:

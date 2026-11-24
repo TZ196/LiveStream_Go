@@ -13,6 +13,7 @@ require (
 	github.com/twmb/franz-go v1.20.4
 	github.com/twmb/franz-go/pkg/kmsg v1.12.0
 	golang.org/x/crypto v0.59.0
+	golang.org/x/text v0.44.0
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.31.2
 )
@@ -44,6 +45,5 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/sys v0.50.0 // indirect
-	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
