@@ -21,6 +21,7 @@ import (
 const Topic = "live.danmaku"
 const RealtimeGroup = "danmaku-realtime"
 const PersistenceGroup = "danmaku-persistence"
+const RecentCacheGroup = "danmaku-recent-cache"
 
 // Event 是审核通过后冻结的弹幕；发布重试不能更换任何业务字段。
 type Event struct {

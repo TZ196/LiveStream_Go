@@ -17,6 +17,7 @@
 | live-realtime | 单个 API 进程内默认 4 个成员，共享连接管理器和 Redis 投影 |
 | live-persistence | Worker 内默认 4 个成员，只消费 live.events 并推进本组 SQL 检查点 |
 | danmaku-realtime | API 内默认 4 个成员，只消费 live.danmaku，向共享 Manager 分发 |
+| danmaku-recent-cache | API 内独立消费 live.danmaku，维护场次最近五分钟 Redis 缓存；与实时组独立提交 |
 | danmaku-persistence | Worker 内默认 4 个成员，只消费 live.danmaku，保存弹幕及本组 SQL 检查点 |
 
 每组独立订阅其业务 Topic 的全部 16 个分区；点赞与弹幕不共用消费组。组内同一分区同时分给一个成员，4 个成员均衡时各负责 4 个分区。点赞和弹幕各有实时、持久化组；四组的成员数分别配置为 1–16，重启对应进程生效。每个成员串行处理和提交自己的记录，进程完成一次全组恢复检查后才开始拉取。
@@ -111,7 +112,7 @@ Kafka 记录、检查点、Redis 投影和 MySQL 历史的保留与清理必须�
 
 ## 弹幕开发分支的固定决策
 
-弹幕使用 live.danmaku、danmaku-realtime 和 danmaku-persistence，16 分区、每组初始 4 个成员。AC 在发布前审核；事件 payload 保存原始 content 和认证用户 username 快照，顶层 moderation_version 为词库与规范化规则的 SHA-256 版本。请求身份沿用可靠性设计。消费者不使用当前词库重新审核已接受事件。
+弹幕使用 live.danmaku、danmaku-realtime、danmaku-persistence 和 danmaku-recent-cache，16 分区、各组默认 4 个成员。AC 在发布前审核；事件 payload 保存原始 content 和认证用户 username 快照，顶层 moderation_version 为词库与规范化规则的 SHA-256 版本。请求身份沿用可靠性设计。消费者不使用当前词库重新审核已接受事件。缓存组异常消息跳过，不写入持久化组隔离表；缓存组故障与恢复仍需独立验证。
 
 同场次有界串行分发只统一本 API 内的投递次序，不按跨用户客户端时间排序。实时推送尽力送达，MySQL 历史最终一致；不能声称 WebSocket 恰好一次。弹幕不写点赞 consumer_inbox，不修改点赞恢复位移或投影版本。实际接入、故障与测量证据见[本轮报告](../verification/reports/danmaku.md)。
 

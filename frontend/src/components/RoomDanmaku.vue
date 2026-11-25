@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { nextTick } from 'vue'
 import type { useRoomDanmaku } from '../danmaku'
 
 const props = defineProps<{ state: ReturnType<typeof useRoomDanmaku>; open: boolean }>()
@@ -10,6 +11,18 @@ function onKey(event: KeyboardEvent) {
     sendDraft()
   }
 }
+async function loadOlder(list: HTMLElement) {
+  if (historyBusy.value || !hasMore.value) return
+  const height = list.scrollHeight
+  const top = list.scrollTop
+  await loadHistory(true)
+  await nextTick()
+  list.scrollTop = top + list.scrollHeight - height
+}
+function onScroll(event: Event) {
+  const list = event.currentTarget as HTMLElement
+  if (list.scrollTop <= 20) void loadOlder(list)
+}
 function formatTime(value: string) { return new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) }
 </script>
 
@@ -20,7 +33,7 @@ function formatTime(value: string) { return new Date(value).toLocaleTimeString('
       <button class="retry-button" type="button" :disabled="historyBusy" @click="loadHistory(false)">刷新弹幕</button>
       <button v-if="hasMore" class="retry-button" type="button" :disabled="historyBusy" @click="loadHistory(true)">加载更早弹幕</button>
     </div>
-    <ol class="danmaku-list" aria-live="polite" aria-relevant="additions">
+    <ol class="danmaku-list" @scroll="onScroll" aria-live="polite" aria-relevant="additions">
       <li v-for="item in messages" :key="item.event_id">
         <time :datetime="item.created_at">{{ formatTime(item.created_at) }}</time>
         <strong>{{ item.username }}</strong>
