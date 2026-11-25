@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { createRoom, listRooms, type Room, type RoomFilter } from '../api/rooms'
 import { ApiError } from '../api/http'
 import RoomDetailPage from './RoomDetailPage.vue'
+import cover from '../assets/live-cover.png'
 
 const props = defineProps<{ token: string; userId: string }>()
 const emit = defineEmits<{ expired: [] }>()
@@ -94,9 +95,10 @@ onBeforeUnmount(() => {
     @back="backToList" @expired="emit('expired')" />
   <section v-else aria-labelledby="rooms-title">
     <div class="account-heading">
-      <div><span class="eyebrow">LIVE ROOMS</span><h1 id="rooms-title">直播间</h1></div>
-      <p class="field-help">创建你的房间，或查看大家的房间。</p>
+      <div><span class="eyebrow">DISCOVER LIVE</span><h1 id="rooms-title">发现你的同频时刻<span class="heading-dot">.</span></h1><p class="rooms-subtitle">走进一个直播间，让相遇从一句弹幕开始。</p></div>
     </div>
+    <details class="room-create-panel">
+      <summary><span aria-hidden="true">＋</span> 开启我的直播</summary>
     <form class="account-card room-create" :aria-busy="creating" @submit.prevent="submitRoom">
       <h2>创建房间</h2>
       <label for="room-title">房间标题</label>
@@ -107,6 +109,7 @@ onBeforeUnmount(() => {
       <p id="room-title-help" class="field-help">1–80 个字符，所有已登录用户都可以查看。已有房间可在“我的房间”中选择“已结束”后重新开播，无需再次创建。</p>
       <p v-if="createMessage" class="form-message" data-kind="error" role="alert">{{ createMessage }}</p>
     </form>
+    </details>
     <div class="room-filters">
       <div><label for="room-status">房间状态</label>
         <select id="room-status" v-model="filter.status" :disabled="creating" @change="loadRooms()">
@@ -125,10 +128,10 @@ onBeforeUnmount(() => {
     <p v-else-if="rooms.length === 0 && !listMessage" class="empty-state">当前筛选条件下还没有房间。</p>
     <ul class="room-grid" aria-label="房间列表">
       <li v-for="room in rooms" :key="room.id" class="room-card">
-        <span class="room-badge" :data-status="room.status">{{ room.status === 'OPEN' ? '直播中' : '已结束' }}</span>
-        <h2>{{ room.title }}</h2>
-        <p class="field-help">房间 {{ room.id }} · {{ room.owner_id === userId ? '我创建的' : `房主 ${room.owner_id}` }}</p>
-        <button class="retry-button" type="button" :disabled="creating" @click="selectedId = room.id">查看房间</button>
+        <button class="room-card-open" type="button" :disabled="creating" :aria-label="'查看房间：' + room.title" @click="selectedId = room.id">
+          <div class="room-card-cover"><img :src="cover" :alt="room.title + '的演示封面'" loading="lazy" /><span class="room-badge" :data-status="room.status">{{ room.status === 'OPEN' ? '直播中' : '已结束' }}</span><span class="card-play" aria-hidden="true">▷</span><span class="card-cover-note">演示画面</span></div>
+          <div class="room-card-content"><h2>{{ room.title }}</h2><div class="room-card-footer"><span class="card-host"><span class="card-avatar" aria-hidden="true">{{ room.owner_id === userId ? '我' : '主' }}</span>{{ room.owner_id === userId ? '我的直播间' : '主播 #' + room.owner_id }}</span><span class="card-enter">{{ room.status === 'OPEN' ? '进入直播' : '查看历史' }} <span aria-hidden="true">↗</span></span></div></div>
+        </button>
       </li>
     </ul>
     <button v-if="nextCursor" class="retry-button room-more" type="button" :disabled="loading || creating" @click="loadRooms(true)">加载更多</button>
