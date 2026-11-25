@@ -84,3 +84,74 @@ func TestSlowConnectionIsolation(t *testing.T) {
 		t.Fatal("旧对象的延迟清理删除了新场次对象")
 	}
 }
+
+// TestPauseWaitsForExistingOperations 验证暂停等待旧操作，但不在等点赞时占住房间准入锁。
+func TestPauseWaitsForExistingOperations(t *testing.T) {
+	manager := NewManager(nil, nil, nil, nil, nil, "test")
+	manager.SetAvailable(true)
+	manager.admission.RLock()
+	manager.likeAdmission.RLock()
+	roomHeld, likeHeld := true, true
+	done := make(chan struct{})
+	go func() {
+		manager.Pause("RECOVERING")
+		close(done)
+	}()
+	t.Cleanup(func() {
+		if roomHeld {
+			manager.admission.RUnlock()
+		}
+		if likeHeld {
+			manager.likeAdmission.RUnlock()
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("暂停协程没有退出")
+		}
+		manager.dispatchCancel()
+		manager.dispatchWait.Wait()
+	})
+	waitFor := func(check func() bool, message string) {
+		deadline := time.Now().Add(2 * time.Second)
+		for !check() {
+			if time.Now().After(deadline) {
+				t.Fatal(message)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	// 写锁开始等待后，新读者不能进入；借此确认暂停确实等到了旧房间操作。
+	waitFor(func() bool {
+		if manager.admission.TryRLock() {
+			manager.admission.RUnlock()
+			return false
+		}
+		return true
+	}, "暂停没有等待在途房间操作")
+	manager.admission.RUnlock()
+	roomHeld = false
+	// 旧点赞仍在执行时，共享房间锁应已经释放，不能被点赞发布一起拖住。
+	waitFor(func() bool {
+		if !manager.admission.TryLock() {
+			return false
+		}
+		manager.admission.Unlock()
+		return true
+	}, "等待在途点赞时仍占用共享房间锁")
+	select {
+	case <-done:
+		t.Fatal("在途点赞尚未结束，暂停却提前返回")
+	default:
+	}
+	manager.likeAdmission.RUnlock()
+	likeHeld = false
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("在途操作结束后暂停没有返回")
+	}
+	if manager.Available() || manager.State() != "RECOVERING" {
+		t.Fatal("暂停状态未保留")
+	}
+}

@@ -86,3 +86,11 @@ LIVESTREAM_TEST_DANMAKU_LOAD=1 go test -race -count=1 -v ./internal/realtime -ru
 Redis 请求身份变化可能有五分钟保守保护，即使 AOF 看似完整；普通 API 重启沿用同一 Redis 身份无需等待。缺原冻结记录和 SQL 结果的旧请求可长期未确认，无耐久请求账本或 Outbox。点赞恢复中再次断电、任务接管和断点续建仍不在范围。
 
 未做长时稳态容量、跨实例、真实公网故障或完整 Kafka 多轮再均衡压力；全局连接配额、完整在线人数及 failed_events 持久隔离未交付。不宣称整个 V1/P8 完成。
+
+## 2026-11-25 同步等待告警复查
+
+gopls 复现 manager.go 的两处 SA2001。原空临界区用于等待既有操作完成，不能删除锁；改为两个明确的等待方法，各自在返回前 defer 解锁，维持“先释放共享房间锁，再等待旧点赞发布”的原顺序，没有屏蔽分析器或改变恢复边界。
+
+在已有 likes_test.go 增加 TestPauseWaitsForExistingOperations，核对暂停确实等待旧房间操作和点赞、等待点赞时共享锁可用、结束后状态保持 RECOVERING；原写法及整理后的写法分别通过该 race 用例。整理后 realtime 全部单元/race、go vet ./...、go test ./...、API/migrate/Worker 构建均通过；gopls 对修改文件无诊断，Staticcheck v0.8.1 的 SA2001 专项通过。
+
+本次未重跑真实中间件集成；未更改协议、迁移、限流口径、历史数量或目录布局，测试文件保留。

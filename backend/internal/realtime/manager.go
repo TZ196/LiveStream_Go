@@ -314,10 +314,20 @@ func (manager *Manager) Available() bool { return manager.available.Load() }
 func (manager *Manager) Pause(state string) {
 	manager.available.Store(false)
 	manager.state.Store(state)
+	manager.waitForRoomChanges()
+	manager.waitForLikePublishes()
+}
+
+// waitForRoomChanges 等待已准入的房间操作结束，函数返回时立即释放共享锁。
+func (manager *Manager) waitForRoomChanges() {
 	manager.admission.Lock()
-	manager.admission.Unlock()
+	defer manager.admission.Unlock()
+}
+
+// waitForLikePublishes 等待旧点赞发布收尾，此时不再占用共享房间锁。
+func (manager *Manager) waitForLikePublishes() {
 	manager.likeAdmission.Lock()
-	manager.likeAdmission.Unlock()
+	defer manager.likeAdmission.Unlock()
 }
 
 func (manager *Manager) UseProjection(projection *likes.ProjectionRepository, initializer *likes.ProjectionInitializer) {
