@@ -3,19 +3,27 @@ package realtime
 import (
 	"context"
 	"maps"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/TZ196/LiveStream_Go/backend/internal/danmaku"
 )
 
 // 每个有观众的场次拥有独立状态。roomID 不变，closed 关闭后不再复用。
 // 其余状态由 mu 保护，公开榜单的查询缓存另外由 board.mu 保护。
 type audience struct {
-	mu       roomMutex
-	closed   atomic.Bool
-	roomID   uint64
-	clients  map[*connection]struct{}
-	revision int64
-	pending  *likeUpdate
+	mu          roomMutex
+	closed      atomic.Bool
+	roomID      uint64
+	dispatch    chan danmakuDelivery
+	done        chan struct{}
+	closeOnce   sync.Once
+	recent      map[string]danmaku.Event
+	recentOrder []string
+	clients     map[*connection]struct{}
+	revision    int64
+	pending     *likeUpdate
 	// 抓取指标时只读这三个时间点，即使场次锁被长时间持有也能观察到积压。
 	pendingSince  atomic.Pointer[time.Time]
 	sendingSince  atomic.Pointer[time.Time]
@@ -60,6 +68,9 @@ func newAudience(roomID uint64) *audience {
 	return &audience{
 		mu:          make(roomMutex, 1),
 		roomID:      roomID,
+		dispatch:    make(chan danmakuDelivery, 128),
+		done:        make(chan struct{}),
+		recent:      make(map[string]danmaku.Event),
 		clients:     make(map[*connection]struct{}),
 		people:      make(map[string]*personalUpdate),
 		dirtyPeople: make(map[string]*personalUpdate),
@@ -106,6 +117,8 @@ func (manager *Manager) register(roomID, sessionID uint64, userID string, client
 			if view == nil || view.closed.Load() {
 				view = newAudience(roomID)
 				manager.audiences[sessionID] = view
+				manager.dispatchWait.Add(1)
+				go manager.dispatchDanmaku(view)
 			}
 			manager.mu.Unlock()
 		}
@@ -140,7 +153,7 @@ func (manager *Manager) unregister(sessionID uint64, view *audience, userID stri
 	}
 	empty := len(view.clients) == 0
 	if empty {
-		view.closed.Store(true)
+		view.stop()
 	}
 	view.mu.Unlock()
 	if empty {
@@ -157,7 +170,7 @@ func (manager *Manager) detachRooms(roomID uint64) []*connection {
 			continue
 		}
 		view.mu.Lock()
-		view.closed.Store(true)
+		view.stop()
 		for client := range view.clients {
 			clients = append(clients, client)
 		}
@@ -171,4 +184,9 @@ func closeClients(clients []*connection, reason string) {
 	for _, client := range clients {
 		client.close(reason)
 	}
+}
+
+func (view *audience) stop() {
+	view.closed.Store(true)
+	view.closeOnce.Do(func() { close(view.done) })
 }

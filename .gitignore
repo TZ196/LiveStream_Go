@@ -7,6 +7,10 @@
 *.test
 coverage.out
 
+# 测试源码仅在本地保留并运行，不提交到 main 或任务分支。
+*_test.go
+/frontend/tests/
+
 # 前端依赖和构建产物不提交。
 /frontend/node_modules/
 /frontend/dist/

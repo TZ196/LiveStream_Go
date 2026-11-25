@@ -15,6 +15,7 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/database"
 	"github.com/TZ196/LiveStream_Go/backend/internal/httpserver"
 	"github.com/TZ196/LiveStream_Go/backend/internal/logging"
+	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 )
@@ -83,10 +84,20 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	roomRepository := room.NewRepository(db)
 	roomService := room.NewService(roomRepository)
 	apiServer := httpserver.New(cfg, logger, db, userService, roomService, tokens)
-	stopLikes, err := startLikes(runCtx, db, roomService, apiServer, logger)
+	manager := realtime.NewManager(roomService, nil, nil, nil, userRepository, "")
+	if os.Getenv("LIVESTREAM_ENABLE_LIKES") == "true" || os.Getenv("LIVESTREAM_ENABLE_DANMAKU") == "true" {
+		apiServer.EnableRealtime(manager, os.Getenv("LIVESTREAM_WS_ORIGIN"))
+	}
+	capabilities, stopCapabilities := context.WithCancel(runCtx)
+	var capabilitiesDone = make(chan struct{})
+	go func() { defer close(capabilitiesDone); manager.RunCapabilities(capabilities) }()
+	defer func() { stopCapabilities(); <-capabilitiesDone; manager.Close() }()
+	stopLikes, err := startLikes(runCtx, db, manager, logger)
 	if err != nil {
 		return errors.Join(err, database.Close(db))
 	}
+
+	stopDanmaku := startDanmaku(runCtx, db, roomService, userRepository, manager, apiServer, logger)
 
 	// Hertz 会调用这个函数等待运行错误或停止信号。
 	// Spin 不直接返回错误，因此需要保存监听失败的原因。
@@ -114,6 +125,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	)
 	apiServer.Hertz.Spin()
 	stopLikes()
+	stopDanmaku()
+	manager.Close()
 
 	// HTTP 关闭流程返回后再关闭连接池；关闭错误也交给入口处理。
 	closeErr := database.Close(db)

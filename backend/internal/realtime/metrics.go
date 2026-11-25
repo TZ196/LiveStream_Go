@@ -102,7 +102,13 @@ func newDeliveryMetrics(m *Manager) *deliveryMetrics {
 
 // MetricsHandler 输出本实例的指标。抓取待发年龄只读时间戳，即使场次锁忙也能观察积压。
 func (m *Manager) MetricsHandler() http.Handler {
-	return promhttp.HandlerFor(m.metrics.registry, promhttp.HandlerOpts{})
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		registries := prometheus.Gatherers{m.metrics.registry}
+		if service := m.danmaku.Load(); service != nil {
+			registries = append(registries, service.Metrics.Registry)
+		}
+		promhttp.HandlerFor(registries, promhttp.HandlerOpts{}).ServeHTTP(writer, request)
+	})
 }
 
 // ObserveProjection 使用 Kafka 记录的生产者时间。业务事件中的 UUIDv7 时间来自浏览器。

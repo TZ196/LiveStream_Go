@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前要求应用数据库结构版本 6。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前 main 代码要求结构版本 8。V7 仅新增 danmaku_messages 及索引/外键，V8 仅新增 failed_events；均不改写点赞数据。本轮仅在隔离测试库执行，尚未升级用户原开发库；升级 V8 前停止旧 API/Worker 并备份，旧二进制拒绝高版本，切回旧版本代码时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见[迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -63,7 +63,7 @@ npm run dev
 
 登录凭证保存于当前浏览器同源存储，刷新或重新打开页面可恢复，原有 30 分钟有效期不会延长；到期或主动退出后重新登录。同源标签页共享账号和退出状态，测试两个不同账号请使用独立浏览器或隐私窗口。首次更新旧版页面时，原内存凭证没有保存，需要登录一次。
 
-Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。直播间已接入 WebSocket 点赞和本场点赞榜。完整弹幕和在线人数协议仍待交付。
+Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。直播间已接入 WebSocket 点赞和本场点赞榜。弹幕分支已接入 AC、共享 WebSocket 弹幕与历史；完整在线人数协议仍待交付。
 
 HTTP 客户端请求超时为 5 秒，离开页面取消未完成请求，写请求不自动重试。业务页面不显示开发连接检查，排查服务状态时直接访问 /healthz 和 /readyz；`npm run build` 生成的 dist 不包含开发代理，目前尚未接入 API 静态托管。
 
@@ -98,14 +98,14 @@ GORM 创建底层连接池，DB() 只取得同一池用于配置、检查和关�
 ```bash
 go vet ./...
 go test ./...
-go build ./cmd/api ./cmd/migrate
+go build ./cmd/api ./cmd/migrate ./cmd/worker
 ```
 
-修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check` 和 `npm run build`。Go 集成测试需要显式指定隔离的 Kafka、Redis、MySQL 环境，并发检查使用 `go test -race`。具体入口见[验证计划](verification/plan.md)。
+修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check` 和 `npm run build`。按用户要求，后端 `*_test.go` 与 frontend/tests/ 仅保留本地，不提交或推送；本机有测试文件时另外执行 `npm test`、`go test` 和适用的 `go test -race`。新检出仓库没有这些用例，`no test files` 只能表示未执行测试，不能据此宣布用例通过。集成验证须显式指定隔离的 Kafka、Redis、MySQL，历史报告中的命令依赖当时本地保留的源码。验收场景见[验证计划](verification/plan.md)。
 
 ## 后续部署阶段
 
-P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；P5 扩展弹幕链路，点赞已支持普通重启核验与异常重建，P6 继续完善历史与异常隔离。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
+P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；P5 接入独立弹幕链路、审核与历史，V8 补弹幕异常持久隔离；点赞保留普通重启核验及异常重建，点赞异常隔离仍待后续。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见[可靠性设计](design/reliability.md)。
 
 P7 的 Compose 包含 API、Worker、MySQL、Redis、Kafka 五个服务。前端完成类型检查与构建后由 API 同源托管，Worker 镜像不包含前端；backend/Dockerfile 以仓库根目录为构建上下文。页面回退不能覆盖未知 `/api`、`/ws` 错误。公网 TLS、域名与生产运维不属于本阶段。
 
@@ -135,7 +135,7 @@ Set-Location backend
 go run ./cmd/migrate
 ```
 
-已有场次投影时先完成下文的排行榜补建。全新环境或补建完成后，在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm install` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入直播中的房间进行点赞。Kafka init 容器只负责在缺失时创建 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 只决定普通 API 就绪；响应 recovery 与房间 likes-state 接口独立报告点赞状态。Worker 进度单独查看。
+已有场次投影时先完成下文的排行榜补建。全新环境或补建完成后，在两个已加载相同环境变量的终端分别执行 `go run ./cmd/api` 和 `go run ./cmd/worker`；在 `frontend` 执行 `npm ci` 后运行 `npm run dev`。访问 `http://127.0.0.1:5173`，登录并进入房间点赞或发送弹幕。Kafka init 只在缺失时分别创建 live.events、live.danmaku 两个 16 分区 Topic；不能随意删除或重建已有 Topic。`/readyz` 只决定普通 API 就绪；响应 recovery 与房间 likes-state 接口独立报告点赞状态。Worker 进度单独查看。
 
 `LIVESTREAM_REALTIME_CONSUMERS` 控制 API 内的实时组成员数，`LIVESTREAM_PERSISTENCE_CONSUMERS` 控制 Worker 内的持久化组成员数。两项默认均为 4，可分别设置为 1–16。变更后重启对应进程，Kafka 自动重新分配原有分区。可以用 Broker 自带命令核对两个组的成员和分区分配。
 
@@ -143,7 +143,33 @@ go run ./cmd/migrate
 docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --describe --all-groups --members --verbose
 ```
 
-新场次首次进入时初始化空榜，显示本场 0 赞。正常 Redis 重启自动核验并沿用完整投影；丢失或回退时自动停止后端接收、等待 Worker 追平，再由 MySQL 明细与去重记录构建新代次。浏览器在原场次继续暂存，恢复后自动补发。必要日志缺失、明细冲突或 Topic 改变时保持 BLOCKED 并记录原因，修复后重启 API。当前只支持单 API 与独立 Worker，不提供恢复中断的断点续建。单 Kafka Broker 与 Redis AOF everysec 均不提供任何故障下零丢失保证。
+新场次首次进入时初始化空榜，显示本场 0 赞。正常 Redis 重启自动核验并沿用完整投影；丢失或回退时自动停止后端点赞接收、保留共享连接并等待 Worker 追平，再由 MySQL 明细与去重记录构建新代次。浏览器在原场次继续暂存，恢复后自动补发。必要日志缺失、明细冲突或 Topic 改变时保持 BLOCKED 并记录原因，修复后重启 API。当前只支持单 API 与独立 Worker，不提供恢复中断的断点续建。单 Kafka Broker 与 Redis AOF everysec 均不提供任何故障下零丢失保证。
+
+## 启用弹幕与审核
+
+在原有私有 .env 中补齐样例新增项，两个进程使用相同 Kafka/MySQL 配置：
+
+```dotenv
+LIVESTREAM_ENABLE_DANMAKU=true
+LIVESTREAM_MODERATION_WORDS=configs/moderation_words.tsv
+LIVESTREAM_DANMAKU_REALTIME_CONSUMERS=4
+LIVESTREAM_DANMAKU_PERSISTENCE_CONSUMERS=4
+LIVESTREAM_WORKER_METRICS_ADDR=127.0.0.1:9091
+```
+
+停旧 API/Worker 并备份后，在 backend 执行迁移 7；回到仓库根目录创建缺少的 Topic：
+
+```bash
+docker compose --env-file .env -f deployments/docker/compose.yaml run --rm kafka-init
+```
+
+保留原点赞 Topic、位移、Redis 代次和数据卷。仍运行原来的两个入口。只关闭点赞时弹幕可以独立启用；Redis/Kafka 整体不可用则相关业务都会受影响。词库为 80 条人工短语，UTF-8 TSV 的 category、term、source 三列均必填；词库加载错误只禁止新弹幕，点赞和历史按自身依赖继续服务。修改词库后重启 API，已冻结/已接受事件不重审。
+
+Redis 进程重启或弹幕请求身份丢失时，弹幕可能进入五分钟保护。草稿和未确认请求保留；原冻结事件或 SQL 结果能证明时复用原身份，缺证据的旧请求不重新生成审核版本。此状态与点赞恢复独立，详见[可靠性设计](design/reliability.md#弹幕登记审核与结果核对)。
+
+API /metrics 汇总两业务，Worker 默认回环 9091/metrics 报告自身持久化状态与逐分区 lag。/readyz 状态码只表示普通 API 就绪，recovery 表示点赞状态，danmaku 表示 READY/UNAVAILABLE/DISABLED，不把 Worker 或浏览器送达混入其中。
+
+历史接口为 GET /api/v1/rooms/{id}/danmaku，可选 session_id、limit、cursor，关闭房间也可查询。前端列表最多 200 条，支持更早历史及事件去重，未确认请求不自动更换 ID。
 
 ## 已有点赞数据升级到本场榜单
 
@@ -155,7 +181,7 @@ docker compose -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/k
    docker compose --env-file .env -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --all-groups --describe
    ```
 
-2. 从旧结构升级时，先停旧进程、备份并在 `backend/` 执行 `go run ./cmd/migrate` 到版本 6。版本 5 新增批次数，版本 6 仅保存有效代次。
+2. 从旧结构升级时，先停旧进程、备份并在 `backend/` 执行 `go run ./cmd/migrate` 到当前版本 8。版本 5 新增批次数，版本 6 仅保存有效代次，版本 7、8 新增弹幕与异常表。
 3. 在 `backend/` 使用新代码、原环境变量和数据库账号运行补建命令。
 
    ```sh

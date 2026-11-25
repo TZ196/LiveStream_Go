@@ -79,7 +79,7 @@
 
 ## Kafka Redis 与一致性
 
-- Kafka 阶段使用 `live.events` 和 `live-realtime`、`live-persistence` 两个独立消费组；弹幕按 `room_id`、点赞按 `room_id:event_id` 分区，细节以 Kafka 设计为准。变更分区数或 Key 算法前说明兼容影响。
+- 点赞使用 `live.events` 和 `live-realtime`、`live-persistence`；弹幕独立使用 `live.danmaku` 和 `danmaku-realtime`、`danmaku-persistence`。弹幕按 `room_id:user_id`、点赞按 `room_id:event_id` 分区；同用户同房间保留分区日志顺序，不承诺跨用户全局顺序，细节以 Kafka 设计为准。变更分区数或 Key 算法前说明兼容影响。
 - 实时消费者在持有 RoomHub 的 API Server 内处理广播；Worker 负责持久化。Producer 获得 Broker 确认后才发送接受确认，该确认不代表所有客户端已收到或数据库已经落盘。
 - 区分客户端 `request_id` 与服务端 `event_id`。请求重试、生产重试、消费重放和客户端重复接收分别设计，不能只靠 Producer 幂等解决全部重复问题。
 - Worker 在对应数据库事务成功后提交 Kafka 位移；同一分区并行处理时，不跨过尚未完成的消息提交更高位移。
@@ -93,6 +93,7 @@
 
 - 执行命令前检查模块和脚本是否存在、工作目录是否正确。未初始化的工程不能声称测试通过。
 - Go 代码修改：确认 `backend/go.mod` 存在后，在 `backend/` 执行 `go vet ./...`、`go test ./...`；先完成相关文件的格式检查。P1a 起构建实际存在的 `./cmd/api`，P1b 增加 `./cmd/migrate`，P4 建立 Worker 后再增加 `./cmd/worker`，不为通过检查提前创建空入口。
+- 用户要求测试源码只保留在本地：后端 `*_test.go`、`frontend/tests/` 和测试产物不提交或推送到 main 及任务分支；已跟踪的测试只移出 Git 索引，保留本地文件，不改写历史提交。必要单元、并发及集成验证继续在本地执行。全新检出没有这些用例，不把 `go test` 的 `no test files` 当作用例通过，也不声称远程可以复现仅在本地保存的测试。
 - 当前 P1a 按用户要求删除 `config_test.go` 和 `server_test.go`，不移动到其他目录，也不增加替代测试文件或仅为测试服务的注入接口。必要检查由助手执行，以格式、静态检查、构建和真实进程行为为依据；`go test` 输出 `no test files` 必须说明没有执行用例。后续业务阶段的验证需求仍按实际范围处理，不把删除当前测试解释为允许省略正确性检查。
 - 并发修改：在支持的环境执行相关 `go test -race`；数据或消息链路修改：增加相应的集成、重试、重复消费和恢复验证。
 - 依赖修改：审查 `go.mod`、`go.sum` 与导入；`go mod verify` 只能检查下载模块完整性，不能代替依赖审批或安全审查。
