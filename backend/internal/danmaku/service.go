@@ -134,7 +134,7 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	case "CONFLICT":
 		return Event{}, failure("REQUEST_CONFLICT", "相同请求编号对应不同内容或场次", false)
 	case "LIMITED":
-		return Event{}, &Fault{Code: "RATE_LIMITED", Message: "每 10 秒最多发送 10 条新弹幕", Retryable: true, RetryAfter: 10000}
+		return Event{}, &Fault{Code: "RATE_LIMITED", Message: "你在本房间每 10 秒最多发送 10 条新弹幕", Retryable: true, RetryAfter: 10000}
 	case "FULL":
 		return Event{}, failure("SERVER_BUSY", "弹幕请求容量已满，请稍后重试", true)
 	case "BUSY":

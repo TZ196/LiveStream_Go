@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -59,15 +60,38 @@ func (repository *Repository) Persist(ctx context.Context, record Record) error 
 		return errors.New("缺少弹幕 Topic 或位置")
 	}
 	event := record.Event
+	createdAt := time.UnixMilli(event.Timestamp).UTC()
+	// 异常时间可能在 MySQL 驱动发送前就被拒绝，应按坏数据隔离，不能误当成断连。
+	if createdAt.Year() < 1000 || createdAt.Year() > 9999 {
+		return fmt.Errorf("%w: 事件时间超出 MySQL 日期范围", ErrInvalidEvent)
+	}
 	userID, _ := strconv.ParseUint(event.UserID, 10, 64)
 	roomID, _ := strconv.ParseUint(event.RoomID, 10, 64)
 	sessionID, _ := strconv.ParseUint(event.SessionID, 10, 64)
 	return repository.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		row := Message{EventID: event.EventID, RequestID: event.RequestID, RequestHash: event.RequestHash, UserID: userID, Username: event.Payload.Username, RoomID: roomID, SessionID: sessionID, Content: event.Payload.Content, ModerationVersion: event.ModerationVersion, CreatedAt: time.UnixMilli(event.Timestamp).UTC()}
+		row := Message{
+			EventID:           event.EventID,
+			RequestID:         event.RequestID,
+			RequestHash:       event.RequestHash,
+			UserID:            userID,
+			Username:          event.Payload.Username,
+			RoomID:            roomID,
+			SessionID:         sessionID,
+			Content:           event.Payload.Content,
+			ModerationVersion: event.ModerationVersion,
+			CreatedAt:         createdAt,
+		}
 		err := tx.Create(&row).Error
 		if err != nil {
 			var duplicate *mysqlerror.MySQLError
 			if !errors.As(err, &duplicate) || duplicate.Number != 1062 {
+				// 只把明确的数据约束错误判为永久异常；断连、死锁和表结构故障继续重试。
+				if errors.As(err, &duplicate) {
+					switch duplicate.Number {
+					case 1264, 1292, 1366, 1406, 1452, 3819:
+						return fmt.Errorf("%w: %v", ErrInvalidEvent, err)
+					}
+				}
 				return err
 			}
 			var old Message
@@ -78,9 +102,14 @@ func (repository *Repository) Persist(ctx context.Context, record Record) error 
 				return ErrConflict
 			}
 		}
-		return tx.Exec(`INSERT INTO worker_checkpoints (consumer_group,topic_id,partition_id,next_offset) VALUES (?,?,?,?)
-            ON DUPLICATE KEY UPDATE next_offset=GREATEST(next_offset,VALUES(next_offset))`, PersistenceGroup, record.TopicID, record.Partition, record.NextOffset).Error
+		return advanceCheckpoint(tx, record.TopicID, record.Partition, record.NextOffset)
 	})
+}
+
+// advanceCheckpoint 必须与本条业务写入或异常隔离共用事务。
+func advanceCheckpoint(tx *gorm.DB, topicID string, partition int32, nextOffset int64) error {
+	return tx.Exec(`INSERT INTO worker_checkpoints (consumer_group,topic_id,partition_id,next_offset) VALUES (?,?,?,?)
+        ON DUPLICATE KEY UPDATE next_offset=GREATEST(next_offset,VALUES(next_offset))`, PersistenceGroup, topicID, partition, nextOffset).Error
 }
 
 // ValidateCheckpoint 接受事务领先 Kafka 的正常重复窗口，但拒绝 Kafka 越过数据库或换 Topic。

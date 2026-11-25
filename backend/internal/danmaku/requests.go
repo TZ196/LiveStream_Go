@@ -2,6 +2,7 @@ package danmaku
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"strconv"
 	"strings"
@@ -22,8 +23,16 @@ type requestState struct{ Hash, Status, Event, Category, Version string }
 
 const identityKey = "danmaku:requests:identity"
 
+//go:embed lua/update_identity.lua
+var updateIdentityLua string
+
+var updateIdentity = redis.NewScript(updateIdentityLua)
+
 func NewRequestStore(client *redis.Client) *RequestStore { return &RequestStore{client: client} }
 func requestKey(user, request string) string             { return "danmaku:request:" + user + ":" + request }
+
+// 额度按用户和房间隔离；同房间的多个页面以及重新开播仍共享这个十秒窗口。
+func rateKey(user, room string) string { return "danmaku:rate:" + user + ":" + room }
 
 // Check 在 Redis 换代或请求账本丢失时建立保护时间。旧记录缺失不能被当作首次请求。
 func (store *RequestStore) Check(ctx context.Context, historical bool) error {
@@ -57,7 +66,7 @@ func (store *RequestStore) Check(ctx context.Context, historical bool) error {
 			cutoff = clock.Add(5 * time.Minute).UnixMilli()
 		}
 		next := run + ":" + strconv.FormatInt(cutoff, 10)
-		changed, err := store.client.Eval(ctx, `local old=redis.call('GET',KEYS[1]); if (old or '')~=ARGV[1] then return 0 end; redis.call('SET',KEYS[1],ARGV[2]); return 1`, []string{identityKey}, raw, next).Int()
+		changed, err := updateIdentity.Run(ctx, store.client, []string{identityKey}, raw, next).Int()
 		if err != nil {
 			return err
 		}
@@ -87,75 +96,23 @@ func (store *RequestStore) Lookup(ctx context.Context, user, request string) (re
 	return requestState{Hash: data["hash"], Status: data["status"], Event: data["event"], Category: data["category"], Version: data["version"]}, nil
 }
 
-var beginRequest = redis.NewScript(`
-local request,rate,ledger,identity=unpack(KEYS)
-local hash,token,expires,event_time,generation=unpack(ARGV)
-if redis.call('GET',identity)~=generation then return {'RESET','','',''} end
-local t=redis.call('TIME')
-local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
-local cutoff=tonumber(string.match(generation,':(%d+)$'))
-for _,item in ipairs({{request,'hash'},{rate,'zset'},{ledger,'zset'}}) do
-  local kind=redis.call('TYPE',item[1]).ok
-  if kind~='none' and kind~=item[2] then return redis.error_reply('DANMAKU_STATE_TYPE') end
-end
-if redis.call('EXISTS',request)==1 then
-  if redis.call('HGET',request,'hash')~=hash then return {'CONFLICT','','',''} end
-  local status=redis.call('HGET',request,'status')
-  local event=redis.call('HGET',request,'event') or ''
-  if status=='ACCEPTED' or status=='REJECTED' then
-    return {status,event,redis.call('HGET',request,'category') or '',redis.call('HGET',request,'version') or ''}
-  end
-  if status~='PROCESSING' then return {'RESET','','',''} end
-  if event=='' and tonumber(event_time)<=cutoff then return {'UNKNOWN','','',''} end
-  if tonumber(redis.call('HGET',request,'until') or '0')>now then return {'BUSY','','',''} end
-  redis.call('HSET',request,'owner',token,'until',now+15000)
-  return {'OWNED',event,'',''}
-end
-if tonumber(event_time)<=cutoff then return {'UNKNOWN','','',''} end
-if now-tonumber(event_time)>86400000 then return {'EXPIRED','','',''} end
-redis.call('ZREMRANGEBYSCORE',rate,'-inf',now-10000)
-if redis.call('ZCARD',rate)>=10 then return {'LIMITED','','',''} end
-redis.call('ZREMRANGEBYSCORE',ledger,'-inf',now)
-if redis.call('ZCARD',ledger)>=100000 then return {'FULL','','',''} end
-redis.call('ZADD',rate,now,request)
-redis.call('PEXPIRE',rate,20000)
-redis.call('HSET',request,'hash',hash,'status','PROCESSING','owner',token,'until',now+15000)
-redis.call('PEXPIREAT',request,expires)
-redis.call('ZADD',ledger,expires,request)
-return {'OWNED','','',''}
-`)
+//go:embed lua/begin_request.lua
+var beginRequestLua string
+
+var beginRequest = redis.NewScript(beginRequestLua)
 
 func (store *RequestStore) Begin(ctx context.Context, event Event, token string) ([]string, error) {
 	store.mu.RLock()
 	generation := store.generation
 	store.mu.RUnlock()
-	return beginRequest.Run(ctx, store.client, []string{requestKey(event.UserID, event.RequestID), "danmaku:rate:" + event.UserID, "danmaku:requests:ledger", identityKey},
+	return beginRequest.Run(ctx, store.client, []string{requestKey(event.UserID, event.RequestID), rateKey(event.UserID, event.RoomID), "danmaku:requests:ledger", identityKey},
 		event.RequestHash, token, event.Timestamp+int64(25*time.Hour/time.Millisecond), event.Timestamp, generation).StringSlice()
 }
 
-var changeRequest = redis.NewScript(`
-local request=KEYS[1]
-local hash,token,action,value,version=unpack(ARGV)
-if redis.call('HGET',request,'hash')~=hash then return 0 end
-local status=redis.call('HGET',request,'status')
-if action=='accept' then
-  if redis.call('HGET',request,'event')~=value then return 0 end
-  redis.call('HSET',request,'status','ACCEPTED','until',0)
-  return 1
-end
-if status~='PROCESSING' or redis.call('HGET',request,'owner')~=token then return 0 end
-if action=='freeze' then
-  local prior=redis.call('HGET',request,'event')
-  if prior and prior~=value then return 0 end
-  redis.call('HSET',request,'event',value,'version',version)
-elseif action=='reject' then
-  if redis.call('HEXISTS',request,'event')==1 then return 0 end
-  redis.call('HSET',request,'status','REJECTED','category',value,'version',version,'until',0)
-elseif action=='release' then
-  redis.call('HSET',request,'until',0)
-end
-return 1
-`)
+//go:embed lua/change_request.lua
+var changeRequestLua string
+
+var changeRequest = redis.NewScript(changeRequestLua)
 
 func (store *RequestStore) Change(ctx context.Context, event Event, token, action, value, version string) error {
 	changed, err := changeRequest.Run(ctx, store.client, []string{requestKey(event.UserID, event.RequestID)}, event.RequestHash, token, action, value, version).Int()
@@ -203,13 +160,10 @@ func (store *RequestStore) ValidateRealtime(ctx context.Context, topicID string,
 	return nil
 }
 
-var markRealtime = redis.NewScript(`
-local current=redis.call('HGET',KEYS[1],ARGV[1])
-local next=ARGV[2]
-if current and not string.match(current,'^%d+$') then return redis.error_reply('INVALID_POSITION') end
-if not current or #next>#current or (#next==#current and next>current) then redis.call('HSET',KEYS[1],ARGV[1],next) end
-return 1
-`)
+//go:embed lua/mark_realtime.lua
+var markRealtimeLua string
+
+var markRealtime = redis.NewScript(markRealtimeLua)
 
 func (store *RequestStore) MarkRealtime(ctx context.Context, record Record) error {
 	return markRealtime.Run(ctx, store.client, []string{"danmaku:realtime:" + record.TopicID}, strconv.Itoa(int(record.Partition)), strconv.FormatInt(record.NextOffset, 10)).Err()

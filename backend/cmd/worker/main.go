@@ -107,7 +107,7 @@ func run() error {
 							metrics.Persist.Observe(time.Since(record.ProducedAt).Seconds())
 						}
 						return err
-					}, metrics)
+					}, repository.Quarantine, metrics)
 					group.Close()
 				}
 				if ctx.Err() != nil {

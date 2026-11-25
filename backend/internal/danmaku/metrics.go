@@ -14,6 +14,7 @@ type Metrics struct {
 	Results        *prometheus.CounterVec
 	Consumer       *prometheus.GaugeVec
 	Lag            *prometheus.GaugeVec
+	Failures       *prometheus.CounterVec
 }
 
 func NewMetrics() *Metrics {
@@ -34,6 +35,7 @@ func NewMetrics() *Metrics {
 	metrics.Results = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "livestream_danmaku_requests_total", Help: "按提交结果计数"}, []string{"result"})
 	metrics.Consumer = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "livestream_danmaku_consumer_ready", Help: "各弹幕消费组运行状态"}, []string{"group"})
 	metrics.Lag = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "livestream_danmaku_partition_lag", Help: "各弹幕消费组逐分区积压"}, []string{"group", "partition"})
-	metrics.Registry.MustRegister(metrics.Results, metrics.Consumer, metrics.Lag)
+	metrics.Failures = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "livestream_danmaku_consumer_failures_total", Help: "按消费组区分短重试、可靠隔离、隔离失败和依赖故障"}, []string{"group", "result"})
+	metrics.Registry.MustRegister(metrics.Results, metrics.Consumer, metrics.Lag, metrics.Failures)
 	return metrics
 }

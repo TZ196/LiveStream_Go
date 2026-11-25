@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前弹幕分支要求结构版本 7。V7 仅新增 danmaku_messages 及索引/外键，不改写点赞数据。本轮仅在隔离测试库执行，尚未升级用户原开发库；旧二进制拒绝高版本，切回 main 时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见 [迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前弹幕分支要求结构版本 8。V7 仅新增 danmaku_messages 及索引/外键，V8 仅新增 failed_events；均不改写点赞数据。本轮仅在隔离测试库执行，尚未升级用户原开发库；升级 V8 前停止旧 API/Worker 并备份，旧二进制拒绝高版本，切回 main 时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见[迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -101,11 +101,11 @@ go test ./...
 go build ./cmd/api ./cmd/migrate ./cmd/worker
 ```
 
-修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check`、`npm test` 和 `npm run build`。Go 集成测试需要显式指定隔离的 Kafka、Redis、MySQL 环境，并发检查使用 `go test -race`。具体入口见[验证计划](verification/plan.md)。
+修改的 Go 文件先执行 gofmt。前端在 frontend 目录执行 `npm run type-check` 和 `npm run build`。按用户要求，后端 `*_test.go` 与 frontend/tests/ 仅保留本地，不提交或推送；本机有测试文件时另外执行 `npm test`、`go test` 和适用的 `go test -race`。新检出仓库没有这些用例，`no test files` 只能表示未执行测试，不能据此宣布用例通过。集成验证须显式指定隔离的 Kafka、Redis、MySQL，历史报告中的命令依赖当时本地保留的源码。验收场景见[验证计划](verification/plan.md)。
 
 ## 后续部署阶段
 
-P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；本轮 P5 接入独立弹幕链路、审核与历史；点赞保留普通重启核验及异常重建，异常持久隔离仍待后续。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见 [可靠性设计](design/reliability.md)。
+P4 点赞子链路使用 Redis 7.4.7 standalone、Apache Kafka 4.0.0（KRaft 单 Broker/Controller）及 MySQL Worker；P5 接入独立弹幕链路、审核与历史，V8 补弹幕异常持久隔离；点赞保留普通重启核验及异常重建，点赞异常隔离仍待后续。Worker 只依赖 Kafka 和 MySQL，Redis 故障时仍可持久化。Redis 使用 AOF everysec、noeviction 和持久卷，恢复规则见[可靠性设计](design/reliability.md)。
 
 P7 的 Compose 包含 API、Worker、MySQL、Redis、Kafka 五个服务。前端完成类型检查与构建后由 API 同源托管，Worker 镜像不包含前端；backend/Dockerfile 以仓库根目录为构建上下文。页面回退不能覆盖未知 `/api`、`/ws` 错误。公网 TLS、域名与生产运维不属于本阶段。
 
@@ -181,7 +181,7 @@ API /metrics 汇总两业务，Worker 默认回环 9091/metrics 报告自身持�
    docker compose --env-file .env -f deployments/docker/compose.yaml exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --all-groups --describe
    ```
 
-2. 从旧结构升级时，先停旧进程、备份并在 `backend/` 执行 `go run ./cmd/migrate` 到当前版本 7。版本 5 新增批次数，版本 6 仅保存有效代次。
+2. 从旧结构升级时，先停旧进程、备份并在 `backend/` 执行 `go run ./cmd/migrate` 到当前版本 8。版本 5 新增批次数，版本 6 仅保存有效代次，版本 7、8 新增弹幕与异常表。
 3. 在 `backend/` 使用新代码、原环境变量和数据库账号运行补建命令。
 
    ```sh

@@ -86,6 +86,13 @@ func startDanmaku(parent context.Context, db *gorm.DB, rooms *room.Service, user
 						return err
 					}
 					return service.Store.MarkRealtime(ctx, record)
+				}, func(ctx context.Context, failed danmaku.FailedRecord) error {
+					// 实时组先独立落库隔离，再推进自己的 Redis 进度，最后由消费循环提交 Kafka。
+					if err := repository.Quarantine(ctx, failed); err != nil {
+						return err
+					}
+					position := danmaku.Record{TopicID: failed.TopicID, Partition: failed.Raw.Partition, NextOffset: failed.Raw.Offset + 1}
+					return service.Store.MarkRealtime(ctx, position)
 				}, service.Metrics)
 				group.Close()
 			}

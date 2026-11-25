@@ -74,7 +74,7 @@ func Close(db *gorm.DB) error {
 }
 
 // RequiredSchemaVersion 是当前程序需要的结构版本，新增迁移时同步更新。
-const RequiredSchemaVersion uint64 = 7
+const RequiredSchemaVersion uint64 = 8
 
 // CurrentVersion 读取成功记录，拒绝缺号、重复或从零开始的异常历史。
 func CurrentVersion(ctx context.Context, db *gorm.DB) (uint64, error) {
@@ -130,7 +130,7 @@ func CheckSchema(ctx context.Context, db *gorm.DB) error {
 	if err = rows.Err(); err != nil {
 		return fmt.Errorf("读取 live_rooms 表检查结果失败: %w", err)
 	}
-	for _, table := range []string{"live_sessions", "consumer_inbox", "interaction_events", "projection_sessions", "worker_checkpoints", "projection_state", "danmaku_messages"} {
+	for _, table := range []string{"live_sessions", "consumer_inbox", "interaction_events", "projection_sessions", "worker_checkpoints", "projection_state", "danmaku_messages", "failed_events"} {
 		columns := "*"
 		if table == "interaction_events" {
 			columns = "click_count"
@@ -140,6 +140,9 @@ func CheckSchema(ctx context.Context, db *gorm.DB) error {
 		}
 		if table == "projection_state" {
 			columns = "id,epoch,topic_id"
+		}
+		if table == "failed_events" {
+			columns = "consumer_group,topic_id,partition_id,record_offset,raw_key,raw_payload,key_hash,payload_hash,key_bytes,payload_bytes,truncated,error_code,error_message,attempts,status,resolution_details,first_failed_at,resolved_at"
 		}
 		rows, err := db.WithContext(ctx).Table(table).Select(columns).Limit(0).Rows()
 		if err != nil {

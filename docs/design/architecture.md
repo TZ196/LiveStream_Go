@@ -58,7 +58,7 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 | backend/internal/config、logging | 配置合并与校验、应用日志和框架日志级别 | P1a |
 | backend/cmd/worker/main.go | Worker 组装、启动与关闭 | P4 |
 | backend/internal/user、room | 用户与房间业务，user/token.go 提供 JWT 和身份 | P1b、P2 |
-| backend/internal/realtime | WebSocket 握手和读写、票据、场次锁、在线快照、榜单分发及送达指标 | 当前点赞子链路 |
+| backend/internal/realtime | 公共连接与能力快照；danmaku*.go 管弹幕接入/分发，likes*.go 管点赞接入/恢复/推送；保持一个包 | 当前双业务连接 |
 | backend/internal/likes | 事件、Kafka 收发和消费组、Redis 投影、MySQL 事务及恢复检查 | 当前点赞子链路 |
 | backend/internal/database/mysql.go | GORM 连接池、迁移版本与所需结构的只读检查 | P1b |
 | backend/cmd/backfill-like-board/main.go | 在停写屏障下补建已有场次的榜单 | 当前点赞榜 |
@@ -108,6 +108,6 @@ API 的目录读写锁只保护 session_id 到场次对象的映射，取出引�
 
 迁移入口复用 LoadMySQL 和 database.Open，但不要求目标库已有业务表；随后由 migrations.Run 取得数据库命名锁、读取连续成功版本、顺序执行缺少的步骤。每个版本完成后才登记成功，任一步失败立即返回；结束时释放锁并关闭连接池。它是一次性维护命令，不是第三个常驻服务；API 与 Worker 均不隐含执行它。
 
-日志关联 request_id、event_id、room_id、分区和位移；禁止记录密码、Bearer、原始握手票据。记录连接数、队列占用、接受延迟、广播延迟、持久化延迟、消费者积压、重复事件和隔离事件。完整指标验证见 [验证设计](../verification/plan.md)。
+日志关联 request_id、event_id、room_id、分区和位移；禁止记录密码、Bearer、原始握手票据。隔离日志只记消费组、Topic UUID、分区、offset、错误类别与尝试次数，原文和有界摘要由业务 Repository 保存在 failed_events。记录连接数、队列占用、接受延迟、广播延迟、持久化延迟、消费者积压、重复事件和隔离事件。完整指标验证见[验证设计](../verification/plan.md)。
 
 弹幕 API 指标包含审核、限流、发布、提交及连接入队延迟；Worker 默认回环 9091/metrics 单独报告持久化和逐分区 lag。点赞四种恢复状态、弹幕可用性和 Worker 状态分别核对，共享依赖故障仍可能同时影响两者。

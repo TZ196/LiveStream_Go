@@ -15,6 +15,7 @@ export function useRoomConnection(token: string, roomId: string) {
   let stopped = true
   let timer: ReturnType<typeof setTimeout> | undefined
   let timeout: ReturnType<typeof setTimeout> | undefined
+  let stable: ReturnType<typeof setTimeout> | undefined
   let controller: AbortController | undefined
   let timing: ReturnType<typeof deliveryTiming> | undefined
   let attempts = 0
@@ -24,6 +25,13 @@ export function useRoomConnection(token: string, roomId: string) {
   function later(delay: number) {
     if (stopped || timer !== undefined) return
     timer = setTimeout(() => { timer = undefined; void connect() }, delay)
+  }
+  function reconnect() {
+    if (stopped || timer !== undefined) return
+    const base = Math.min(30000, 1000 * 2 ** attempts)
+    attempts = Math.min(attempts + 1, 5)
+    // 每次重试分散到略有不同的时刻，避免同一批断开的客户端同时重新握手。
+    later(Math.min(30000, Math.round(base * (0.8 + Math.random() * 0.4))))
   }
   async function connect() {
     if (stopped || socket) return
@@ -38,13 +46,14 @@ export function useRoomConnection(token: string, roomId: string) {
       if (context.room_status === 'CLOSED' || !context.session_id) { stop(); return }
       const ticket = await getLikeTicket(token, roomId, attempt.signal)
       if (stopped || attempt.signal.aborted) return
-      if (ticket.session_id !== context.session_id) { later(1000); return }
+      if (ticket.session_id !== context.session_id) { reconnect(); return }
       const url = new URL(ticket.ws_path, window.location.href)
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(url)
       socket = ws
       generation++
       const currentGeneration = generation
+      let initialized = false
       timing = deliveryTiming(ws, context.session_id)
       timeout = setTimeout(() => { if (socket === ws) ws.close() }, 8000)
       ws.onopen = () => { if (socket === ws) connected.value = true }
@@ -56,7 +65,14 @@ export function useRoomConnection(token: string, roomId: string) {
         timing?.receive(message, performance.now())
         if (message.type === 'ROOM_STATE' && message.data.session_id === sessionId.value) {
           clearTimeout(timeout)
-          attempts = 0
+          // 能收到一次首屏仍可能马上再次因队列满断开，稳定三十秒才重置退避。
+          if (!initialized) {
+            initialized = true
+            stable = setTimeout(() => {
+              stable = undefined
+              if (!stopped && socket === ws) attempts = 0
+            }, 30000)
+          }
           // generation 是连接实例，不会随同连接上的能力快照变化。
           message.data.connection_generation = currentGeneration
         }
@@ -68,10 +84,11 @@ export function useRoomConnection(token: string, roomId: string) {
         socket = undefined
         connected.value = false
         clearTimeout(timeout)
+        clearTimeout(stable); stable = undefined
         timing?.stop()
         timing = undefined
         emit({ type: 'CONNECTION_CLOSED', data: {} })
-        later(Math.min(30000, 1000 * 2 ** Math.min(attempts++, 5)))
+        reconnect()
       }
       ws.onerror = () => { if (socket === ws) emit({ type: 'CONNECTION_ERROR', data: {} }) }
     } catch (error) {
@@ -81,7 +98,7 @@ export function useRoomConnection(token: string, roomId: string) {
         stop()
         return
       }
-      later(Math.min(30000, 1000 * 2 ** Math.min(attempts++, 5)))
+      reconnect()
     }
   }
   function start() { if (!stopped) return; stopped = false; void connect() }
@@ -90,6 +107,7 @@ export function useRoomConnection(token: string, roomId: string) {
     controller?.abort()
     clearTimeout(timer); timer = undefined
     clearTimeout(timeout)
+    clearTimeout(stable); stable = undefined
     const old = socket
     socket = undefined
     old?.close()

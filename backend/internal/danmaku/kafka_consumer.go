@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ type Consumer struct {
 	topicID    string
 	group      string
 	partitions []int32
+	metrics    *Metrics
 }
 
 // NewConsumer 创建一个消费组成员，并要求 live.danmaku 已存在且有稳定 Topic UUID。
@@ -68,11 +70,11 @@ func newKafkaClient(ctx context.Context, brokers []string, group string, opts ..
 // TopicID 返回消费者绑定的 Kafka Topic UUID。
 func (consumer *Consumer) TopicID() string { return consumer.topicID }
 
-// Run 在处理成功后同步提交位移；失败时停止，避免越过未处理的记录。
-// 调用方必须核对已存在投影与提交位移，并协调进程重启和恢复。
-func (consumer *Consumer) Run(ctx context.Context, process func(context.Context, Record) error) error {
-	if process == nil {
-		return errors.New("缺少消费处理函数")
+// Run 在业务处理或可靠隔离成功后提交位移；依赖故障不跳过记录。
+// process 处理有效事件，quarantine 只在永久错误重试耗尽时保存原始记录。
+func (consumer *Consumer) Run(ctx context.Context, process func(context.Context, Record) error, quarantine func(context.Context, FailedRecord) error) error {
+	if process == nil || quarantine == nil {
+		return errors.New("缺少消费处理或异常隔离函数")
 	}
 	for {
 		fetches := consumer.client.PollRecords(ctx, 1)
@@ -92,13 +94,7 @@ func (consumer *Consumer) Run(ctx context.Context, process func(context.Context,
 			// 停止拉取后，已取出的记录仍有独立期限完成业务写入和 offset 提交。
 			recordCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer done()
-			// 每组每条记录在入口校验一次，仓储和内存分发都使用同一份事件。
-			decoded, err := DecodeRecord(record, consumer.topicID)
-			if err != nil {
-				processingErr = fmt.Errorf("%w: Kafka 事件无效: %v", ErrBlocked, err)
-				return
-			}
-			if err := process(recordCtx, decoded); err != nil {
+			if err := consumer.processRecord(recordCtx, record, process, quarantine); err != nil {
 				processingErr = err
 				return
 			}
@@ -110,6 +106,64 @@ func (consumer *Consumer) Run(ctx context.Context, process func(context.Context,
 		if processingErr != nil {
 			return processingErr
 		}
+	}
+}
+
+// processRecord 的三次尝试共用单条记录预算；同一分区不会越过当前未完成记录。
+func (consumer *Consumer) processRecord(ctx context.Context, raw *kgo.Record, process func(context.Context, Record) error, quarantine func(context.Context, FailedRecord) error) error {
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		record, err := DecodeRecord(raw, consumer.topicID)
+		code := "INVALID_EVENT"
+		if err == nil {
+			err = process(ctx, record)
+			code = ""
+			if errors.Is(err, ErrConflict) {
+				code = "EVENT_CONFLICT"
+			} else if errors.Is(err, ErrInvalidEvent) {
+				code = "INVALID_EVENT"
+			}
+		}
+		if err == nil {
+			return nil
+		}
+		// 日志缺口、Topic 换代和恢复依据冲突不是单条坏消息，不能靠隔离解除保护。
+		if errors.Is(err, ErrBlocked) {
+			return err
+		}
+		if attempt < 3 {
+			consumer.observeFailure("retry")
+			timer := time.NewTimer(time.Duration(attempt) * 200 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		if code == "" {
+			consumer.observeFailure("dependency_failed")
+			return fmt.Errorf("弹幕事件处理重试耗尽，保留原位移: %w", err)
+		}
+		failed := FailedRecord{Raw: raw, TopicID: consumer.topicID, Group: consumer.group, Code: code, Cause: err, Attempts: attempt}
+		if err := quarantine(ctx, failed); err != nil {
+			consumer.observeFailure("quarantine_failed")
+			return fmt.Errorf("保存弹幕异常记录失败，保留原位移: %w", err)
+		}
+		consumer.observeFailure("quarantined")
+		// 不将原始正文或任意解码错误写入运行日志，原文和有界摘要保存在异常表。
+		slog.Warn("danmaku_record_quarantined", "group", consumer.group, "topic_id", consumer.topicID, "partition", raw.Partition, "offset", raw.Offset, "error_code", code, "attempts", attempt)
+		return nil
+	}
+	return errors.New("弹幕记录未完成处理")
+}
+
+func (consumer *Consumer) observeFailure(result string) {
+	if consumer.metrics != nil {
+		consumer.metrics.Failures.WithLabelValues(consumer.group, result).Inc()
 	}
 }
 
@@ -271,7 +325,7 @@ func OpenConsumerGroup(ctx context.Context, brokers []string, name string, size 
 }
 
 // Run 启动组内所有成员。任一成员失败就停止同组拉取，等在途处理结束后再统一复查。
-func (group *ConsumerGroup) Run(ctx context.Context, process func(context.Context, Record) error) error {
+func (group *ConsumerGroup) Run(ctx context.Context, process func(context.Context, Record) error, quarantine func(context.Context, FailedRecord) error) error {
 	groupCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var wg sync.WaitGroup
@@ -281,7 +335,7 @@ func (group *ConsumerGroup) Run(ctx context.Context, process func(context.Contex
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := member.Run(groupCtx, process); err != nil {
+			if err := member.Run(groupCtx, process, quarantine); err != nil {
 				first.Do(func() {
 					cause = err
 					cancel()
@@ -321,7 +375,7 @@ func (group *ConsumerGroup) ObserveLag(ctx context.Context, metrics *Metrics) er
 }
 
 // RunObserved 的采样协程随本次组运行创建和回收，不能跨会话复用。
-func (group *ConsumerGroup) RunObserved(ctx context.Context, process func(context.Context, Record) error, metrics *Metrics) error {
+func (group *ConsumerGroup) RunObserved(ctx context.Context, process func(context.Context, Record) error, quarantine func(context.Context, FailedRecord) error, metrics *Metrics) error {
 	child, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	name := group.members[0].group
@@ -341,7 +395,10 @@ func (group *ConsumerGroup) RunObserved(ctx context.Context, process func(contex
 			}
 		}
 	}()
-	err := group.Run(child, process)
+	for _, member := range group.members {
+		member.metrics = metrics
+	}
+	err := group.Run(child, process, quarantine)
 	cancel()
 	<-done
 	metrics.Consumer.WithLabelValues(name).Set(0)

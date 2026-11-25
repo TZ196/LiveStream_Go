@@ -92,6 +92,8 @@ func applyPending(db *gorm.DB, logger *slog.Logger) error {
 			err = createProjectionStateV6(db)
 		case 7:
 			err = createDanmakuV7(db)
+		case 8:
+			err = createFailedEventsV8(db)
 		default:
 			err = fmt.Errorf("版本 %d 尚未定义迁移步骤", version)
 		}

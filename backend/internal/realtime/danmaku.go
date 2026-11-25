@@ -9,104 +9,56 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/danmaku"
 )
 
-type danmakuDelivery struct {
-	record danmaku.Record
-	ctx    context.Context
-	result chan error
-}
+// EnableDanmaku 在启动监听前挂接弹幕能力；实际业务由弹幕 Service 负责。
+func (manager *Manager) EnableDanmaku(service *danmaku.Service) { manager.danmaku.Store(service) }
 
-// QueueDanmaku 等到有界串行分发完成入队才返回成功，不等待浏览器确认。
-func (manager *Manager) QueueDanmaku(ctx context.Context, record danmaku.Record) error {
-	sessionID, err := strconv.ParseUint(record.Event.SessionID, 10, 64)
-	if err != nil {
-		return err
-	}
-	view := manager.lookup(sessionID)
-	if view == nil || view.closed.Load() {
-		return nil
-	}
-	if strconv.FormatUint(view.roomID, 10) != record.Event.RoomID {
-		return danmaku.ErrConflict
-	}
-	item := danmakuDelivery{record: record, ctx: ctx, result: make(chan error, 1)}
-	select {
-	case view.dispatch <- item:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-view.done:
-		return nil
-	case <-manager.dispatchCtx.Done():
-		return manager.dispatchCtx.Err()
-	}
-	select {
-	case err := <-item.result:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-view.done:
-		return nil
-	case <-manager.dispatchCtx.Done():
-		return manager.dispatchCtx.Err()
-	}
-}
-
-func (manager *Manager) dispatchDanmaku(view *audience) {
-	defer manager.dispatchWait.Done()
-	for {
-		select {
-		case <-view.done:
-			return
-		case <-manager.dispatchCtx.Done():
-			return
-		case item := <-view.dispatch:
-			item.result <- manager.fanoutDanmaku(view, item)
-		}
-	}
-}
-
-func (manager *Manager) fanoutDanmaku(view *audience, item danmakuDelivery) error {
-	if err := item.ctx.Err(); err != nil {
-		return err
-	}
-	event := item.record.Event
-	if previous, exists := view.recent[event.EventID]; exists {
-		if previous != event {
-			return danmaku.ErrConflict
-		}
-		return nil
-	}
-	if err := view.mu.LockContext(item.ctx); err != nil {
-		return err
-	}
-	clients := copyClients(view.clients)
-	closed := view.closed.Load()
-	view.mu.Unlock()
-	if closed {
-		return nil
-	}
-	raw, _ := json.Marshal(map[string]any{"version": 1, "type": "DANMAKU_BROADCAST", "event_id": event.EventID, "request_id": event.RequestID, "data": map[string]any{
-		"room_id": event.RoomID, "session_id": event.SessionID, "user_id": event.UserID, "username": event.Payload.Username, "content": event.Payload.Content,
-		"created_at": time.UnixMilli(event.Timestamp).UTC().Format("2006-01-02T15:04:05.000Z"),
-	}})
-	for _, client := range clients {
-		client.delivery.Lock()
-		if !view.closed.Load() {
-			client.offer(&outbound{payload: raw})
-		}
-		client.delivery.Unlock()
-	}
-	view.recent[event.EventID] = event
-	view.recentOrder = append(view.recentOrder, event.EventID)
-	if len(view.recentOrder) > 5000 {
-		delete(view.recent, view.recentOrder[0])
-		view.recentOrder = view.recentOrder[1:]
-	}
+func (manager *Manager) receiveDanmaku(client *connection, proof ticket, input frame) {
 	service := manager.danmaku.Load()
-	if service != nil && !item.record.ProducedAt.IsZero() && time.Now().After(item.record.ProducedAt) {
-		service.Metrics.Enqueue.Observe(time.Since(item.record.ProducedAt).Seconds())
+	if service == nil {
+		manager.danmakuError(client, input.RequestID, &danmaku.Fault{Code: "CAPABILITY_NOT_ENABLED", Message: "弹幕功能尚未启用"})
+		return
 	}
-	if service != nil && !item.record.ReceivedAt.IsZero() && time.Now().After(item.record.ReceivedAt) {
-		service.Metrics.ReceiveEnqueue.Observe(time.Since(item.record.ReceivedAt).Seconds())
+	var data struct {
+		Content string `json:"content"`
 	}
-	return nil
+	if json.Unmarshal(input.Data, &data) != nil {
+		manager.danmakuError(client, input.RequestID, &danmaku.Fault{Code: "INVALID_ARGUMENT", Message: "弹幕内容格式无效"})
+		return
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(input.Data, &fields) != nil || len(fields) != 1 || fields["content"] == nil {
+		manager.danmakuError(client, input.RequestID, &danmaku.Fault{Code: "INVALID_ARGUMENT", Message: "弹幕只接受 content 字段"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(manager.dispatchCtx, 7*time.Second)
+	event, err := service.Submit(ctx, strconv.FormatUint(proof.identity.UserID, 10), strconv.FormatUint(proof.roomID, 10), input.SessionID, input.RequestID, data.Content)
+	cancel()
+	if err != nil {
+		manager.danmakuError(client, input.RequestID, danmaku.AsFault(err))
+		return
+	}
+	raw, _ := json.Marshal(map[string]any{"version": 1, "type": "ACK", "request_id": event.RequestID, "event_id": event.EventID, "data": map[string]any{"status": "accepted", "accepted_via": "kafka", "accepted_at": nil}})
+	client.enqueue(raw)
+}
+
+func (manager *Manager) danmakuError(client *connection, request string, fault *danmaku.Fault) {
+	outcome := "rejected"
+	if fault.Pending {
+		outcome = "pending"
+	}
+	raw, _ := json.Marshal(map[string]any{"version": 1, "type": "ERROR", "request_id": request, "event_id": nil, "data": map[string]any{
+		"code": fault.Code, "message": fault.Message, "category": fault.Category, "outcome": outcome, "retryable": fault.Retryable, "retry_after_ms": fault.RetryAfter,
+	}})
+	client.enqueue(raw)
+}
+
+func (manager *Manager) DanmakuState() string {
+	service := manager.danmaku.Load()
+	if service == nil {
+		return "DISABLED"
+	}
+	if service.Available() {
+		return "READY"
+	}
+	return "UNAVAILABLE"
 }

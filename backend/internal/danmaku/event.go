@@ -60,6 +60,7 @@ func failure(code, message string, retryable bool) *Fault {
 
 var ErrConflict = errors.New("弹幕事件身份或内容冲突")
 var ErrBlocked = errors.New("弹幕消费恢复依据不足")
+var ErrInvalidEvent = errors.New("弹幕事件违反持久化约束")
 
 func ValidateText(content string) error {
 	if !utf8.ValidString(content) || utf8.RuneCountInString(content) < 1 || utf8.RuneCountInString(content) > 200 || strings.TrimSpace(content) == "" {
