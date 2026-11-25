@@ -138,3 +138,13 @@ V8 仅新增 failed_events，弹幕两组分别可靠隔离，Worker 隔离与 c
 合并前重新执行 gofmt 格式检查、go vet ./...、go test -count=1 ./...、go test -race -count=1 ./... 及 API/migrate/Worker 三入口构建，均通过。前端 npm test 的 20 项本地用例、npm run type-check、npm run build 通过。普通 Go 检查未启用外部集成开关；无测试文件的包不计为已执行用例。本次未重启 Docker 或后端，未重复外部集成、浏览器和性能测试，也未迁移原开发库；前述外部结果保留各自执行范围。
 
 为避免检出旧 main 时覆盖本地忽略的测试文件，先备份 22 个测试源码并记录 SHA-256，在独立工作区合并。合并树不跟踪测试源码；业务源码与 9bee808 保持一致，仅同步当前状态、开发计划、运行说明及本节。新检出没有这些本地测试，不能据此宣称已执行同样的用例。最终提交、远程同步和源分支清理结果以 Git 记录为准。
+
+## 2026-11-25 本地启动与 QF1003 提示修正
+
+按用户要求，在 main/d4d5241 的业务代码上启动本地预览。room_quota_integration_test.go 原连续比较 result[0] 的 if/else 改为 switch result[0]，分支与计数含义保持；该测试源码按既定规则只保留本地，不提交。gofmt、gopls check 对该文件无诊断，go vet ./...、go test -count=1 ./...、go test -race -count=1 ./internal/danmaku 及 API/Worker/migrate 三入口构建通过。普通测试中的外部用例未启用，不计作已执行；另在临时独立 Redis 中实际执行 TestDanmakuRoomQuotaIntegration 的 race 用例，通过后删除该测试容器，未清理原 Redis 数据。
+
+启动原 Compose 的 MySQL、Redis、Kafka，健康检查均通过。私有 .env 保留原密码、JWT 密钥和投影代次，仅补弹幕开关、词库路径、弹幕组成员数及 Worker 指标地址。原开发库先作私有 SQL 备份，再执行 V7、V8；旧版本成功时间及升级前后的业务计数一致：1 个用户、1 个房间、4 个场次、129 条点赞事件共 283 次点击、129 条 inbox、16 条 Worker 检查点。这里只表示迁移前后核对结果，后续用户操作可继续改变业务计数。
+
+Kafka init 保留原 live.events，并创建缺少的 live.danmaku。API 与 Worker 由本机用户 systemd 管理，继续使用原有前端进程；页面 http://127.0.0.1:5173 、API http://127.0.0.1:8080 、Worker 指标 http://127.0.0.1:9091/metrics 。直接及经 Vite 代理的 healthz、readyz 均返回 200，readyz 为 status=ready、recovery=READY、danmaku=READY；弹幕实时及持久化组、点赞持久化组的就绪指标为 1，点赞实时链路记录 likes_ready。
+
+本次本地证据目录为 /tmp/livestream-local-start-c9l_hg_g，保存检查结果、进程日志及私有迁移前备份，均不提交。未重跑真实浏览器、吞吐或长时负载，也未修改历史首屏衔接、缓存或其他业务行为。服务按用户要求保持运行。

@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前 main 代码要求结构版本 8。V7 仅新增 danmaku_messages 及索引/外键，V8 仅新增 failed_events；均不改写点赞数据。本轮仅在隔离测试库执行，尚未升级用户原开发库；升级 V8 前停止旧 API/Worker 并备份，旧二进制拒绝高版本，切回旧版本代码时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见[迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前 main 代码要求结构版本 8。V7 仅新增 danmaku_messages 及索引/外键，V8 仅新增 failed_events；均不改写点赞数据。2026-11-25 已备份并将原开发库从 V6 升级至 V8，升级前后旧点赞及迁移记录一致；其他环境升级前仍须停止旧 API/Worker 并备份。旧二进制拒绝高版本，切回旧版本代码时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见[迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -157,7 +157,7 @@ LIVESTREAM_DANMAKU_PERSISTENCE_CONSUMERS=4
 LIVESTREAM_WORKER_METRICS_ADDR=127.0.0.1:9091
 ```
 
-停旧 API/Worker 并备份后，在 backend 执行迁移 7；回到仓库根目录创建缺少的 Topic：
+停旧 API/Worker 并备份后，在 backend 执行迁移至当前版本 8；回到仓库根目录创建缺少的 Topic：
 
 ```bash
 docker compose --env-file .env -f deployments/docker/compose.yaml run --rm kafka-init
