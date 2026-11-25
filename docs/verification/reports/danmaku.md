@@ -138,3 +138,40 @@ V8 仅新增 failed_events，弹幕两组分别可靠隔离，Worker 隔离与 c
 合并前重新执行 gofmt 格式检查、go vet ./...、go test -count=1 ./...、go test -race -count=1 ./... 及 API/migrate/Worker 三入口构建，均通过。前端 npm test 的 20 项本地用例、npm run type-check、npm run build 通过。普通 Go 检查未启用外部集成开关；无测试文件的包不计为已执行用例。本次未重启 Docker 或后端，未重复外部集成、浏览器和性能测试，也未迁移原开发库；前述外部结果保留各自执行范围。
 
 为避免检出旧 main 时覆盖本地忽略的测试文件，先备份 22 个测试源码并记录 SHA-256，在独立工作区合并。合并树不跟踪测试源码；业务源码与 9bee808 保持一致，仅同步当前状态、开发计划、运行说明及本节。新检出没有这些本地测试，不能据此宣称已执行同样的用例。最终提交、远程同步和源分支清理结果以 Git 记录为准。
+
+## 2026-11-25 本地启动与 QF1003 提示修正
+
+按用户要求，在 main/d4d5241 的业务代码上启动本地预览。room_quota_integration_test.go 原连续比较 result[0] 的 if/else 改为 switch result[0]，分支与计数含义保持；该测试源码按既定规则只保留本地，不提交。gofmt、gopls check 对该文件无诊断，go vet ./...、go test -count=1 ./...、go test -race -count=1 ./internal/danmaku 及 API/Worker/migrate 三入口构建通过。普通测试中的外部用例未启用，不计作已执行；另在临时独立 Redis 中实际执行 TestDanmakuRoomQuotaIntegration 的 race 用例，通过后删除该测试容器，未清理原 Redis 数据。
+
+启动原 Compose 的 MySQL、Redis、Kafka，健康检查均通过。私有 .env 保留原密码、JWT 密钥和投影代次，仅补弹幕开关、词库路径、弹幕组成员数及 Worker 指标地址。原开发库先作私有 SQL 备份，再执行 V7、V8；旧版本成功时间及升级前后的业务计数一致：1 个用户、1 个房间、4 个场次、129 条点赞事件共 283 次点击、129 条 inbox、16 条 Worker 检查点。这里只表示迁移前后核对结果，后续用户操作可继续改变业务计数。
+
+Kafka init 保留原 live.events，并创建缺少的 live.danmaku。API 与 Worker 由本机用户 systemd 管理，继续使用原有前端进程；页面 http://127.0.0.1:5173 、API http://127.0.0.1:8080 、Worker 指标 http://127.0.0.1:9091/metrics 。直接及经 Vite 代理的 healthz、readyz 均返回 200，readyz 为 status=ready、recovery=READY、danmaku=READY；弹幕实时及持久化组、点赞持久化组的就绪指标为 1，点赞实时链路记录 likes_ready。
+
+本次本地证据目录为 /tmp/livestream-local-start-c9l_hg_g，保存检查结果、进程日志及私有迁移前备份，均不提交。未重跑真实浏览器、吞吐或长时负载，也未修改历史首屏衔接、缓存或其他业务行为。服务按用户要求保持运行。
+
+## 2026-11-25 直播页面与审核提示
+
+从 main/d4d5241 建立 feat/live-room-ui，同步上一轮已授权的开发库 V8 与本地启动记录。桌面为头像旁的权威点赞数、左侧 16:9 演示画面、右上可收起的点赞榜和右下聊天；手机按画面、榜单、聊天排列。新增 LiveStage 只负责演示图片、屏幕弹幕开关与全屏，其余沿用现有页面和组件；导航、房间卡片和登录注册样式统一。统计来自原 API，不填充模拟在线人数或榜单。
+
+明确不可重试的拒绝从本地队列移除，审核拒绝只显示 3.5 秒通用提示；仅在对应最后提交且输入框为空时恢复草稿，不覆盖后续输入或提交。有效旧缓存中的 rejected 清理，pending/unconfirmed 仍保留原 ID，五次自动尝试后从单一简洁入口核对；正式接受或拒绝清理旧的重试提示。隐藏弹幕失败明细、队列数量及点赞暂存数量；后台的上限、去重和有限重试继续运行。历史不触发屏幕飘字，画面实时输入最多 24 条，同时最多五条、八秒清理；退出、关房和关闭飘字清理动画，减少动态效果偏好下不播放飘字。聊天阅读旧消息保持位置，提供回到最新；前插历史按可见消息定位补偿滚动。
+
+### 实际验证
+
+- 前端 npm test 的 26 项本地用例、npm run type-check、npm run build 通过。覆盖连续 25 次拒绝仍可发送、旧拒绝缓存清理、草稿不覆盖、未知请求原 ID 核对、历史/广播去重、屏幕消息来源及旧提示清理；原点赞十项用例继续通过。源码和产物按用户规则只保留本地，远程新检出没有这些用例。
+- Windows 本机 Headless Chrome 在 1440×960 连接本地真实 API、Redis、Kafka、MySQL，确认审核提示及缓存清理、修改后新 ID 发送、聊天与屏幕广播、点赞总数更新、收起榜单释放聊天空间。浏览器只对自身的弹幕 ACK 暂时不交给页面，观察五次自动尝试使用同一 ID，再通过“重试确认”恢复；未修改 Kafka 位移或中间件数据制造故障。离开房间后该页活动 WebSocket 为零，入房时只有一条。使用已有房间，未新建用户或房间，正常验收弹幕和一次点赞按真实链路保存；未改原账号密码。
+- 浏览器内注入显示夹具，核对长文本、纯文本 HTML、阅读位置、回到最新、最多五条飘字、开关清理、中文输入法与 Shift+Enter 不误发、200 个 emoji 边界。390×844 手机上实测纵向布局和无横向溢出；关房场景通过浏览器只读响应及通知夹具验证，未结束原直播间。夹具不作为真实服务器故障证据。
+- 浏览器主流程通过后，最后的旧提示清理、历史定位与窄屏账号标签调整再执行完整前端检查。未修改 backend、原点赞 Hook、榜单数据 Hook 或共享连接实现；没有新增数据库迁移或依赖。未重跑后端故障、吞吐或容量压测。历史接口仍直接查询 MySQL，尚未落库消息的新观众首屏衔接缺口仍在原范围外。
+
+本地证据目录 /tmp/livestream-ui-cabq8x91 包含检查日志、browser-real.json、browser-fixtures.json、browser-mobile.json、browser-closed.json 和桌面/手机截图；仅为本机资料，不提交。Chrome 使用独立临时配置，本地测试身份仅在浏览器验证中使用，配置目录收尾清理。API、Worker、中间件和 Vite 保持运行，预览地址 http://127.0.0.1:5173 。
+
+### 演示图片
+
+通过内置 image_gen 生成一张本地山湖日出照片，选定文件复制为 frontend/src/assets/live-cover.png，大小 2466774 字节。原图保留于生成工具目录；页面引用项目内资源，画面标注“演示画面”。生成提示如下：
+
+~~~text
+Use case: photorealistic-natural
+Asset type: local static 16:9 cover photograph for a Chinese livestream room demo, used behind live chat overlays.
+Primary request: a beautiful realistic wide alpine lake and mountain landscape at sunrise, with a deep teal lake, pine-covered shore and distant layered mountain peaks, a little soft morning mist and warm sunlight on the ridges. Calm, immersive, premium travel photography, detailed natural textures, believable lighting, tasteful restrained color, no illustration.
+Composition/framing: landscape 16:9, full bleed, wide view, clear lake in the lower half and distant mountains in the upper half; scenery remains attractive when center-cropped on small screens. Avoid tiny high-contrast details that compete with overlaid chat.
+Constraints: image only; no people, text, captions, logos, watermark, borders, UI elements, or fake video controls. Opaque background.
+~~~

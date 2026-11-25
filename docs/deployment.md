@@ -38,7 +38,7 @@ cd backend
 go run ./cmd/migrate && go run ./cmd/api
 ```
 
-Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前 main 代码要求结构版本 8。V7 仅新增 danmaku_messages 及索引/外键，V8 仅新增 failed_events；均不改写点赞数据。本轮仅在隔离测试库执行，尚未升级用户原开发库；升级 V8 前停止旧 API/Worker 并备份，旧二进制拒绝高版本，切回旧版本代码时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见[迁移与恢复边界](design/database.md#迁移与版本)。
+Compose 校验只检查配置；容器健康检查执行应用账号的 `SELECT 1`，仍需单独执行迁移。迁移按顺序运行未成功的版本并记录成功，失败停止；只有迁移成功，API 才启动。当前 main 代码要求结构版本 8。V7 仅新增 danmaku_messages 及索引/外键，V8 仅新增 failed_events；均不改写点赞数据。2026-11-25 已备份并将原开发库从 V6 升级至 V8，升级前后旧点赞及迁移记录一致；其他环境升级前仍须停止旧 API/Worker 并备份。旧二进制拒绝高版本，切回旧版本代码时须核对兼容。版本 6 只新增保存有效投影代次的 projection_state 表，不改写点赞事件。版本 4 建立场次、点赞及消费记录表，版本 5 为每条点赞记录增加点击数，原有记录按一次点击保留。API 启动只读检查结构，不调用 AutoMigrate。详情见[迁移与恢复边界](design/database.md#迁移与版本)。
 
 默认 API 地址为 http://127.0.0.1:8080 。另一个终端执行：
 
@@ -63,7 +63,7 @@ npm run dev
 
 登录凭证保存于当前浏览器同源存储，刷新或重新打开页面可恢复，原有 30 分钟有效期不会延长；到期或主动退出后重新登录。同源标签页共享账号和退出状态，测试两个不同账号请使用独立浏览器或隐私窗口。首次更新旧版页面时，原内存凭证没有保存，需要登录一次。
 
-Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。直播间已接入 WebSocket 点赞和本场点赞榜。弹幕分支已接入 AC、共享 WebSocket 弹幕与历史；完整在线人数协议仍待交付。
+Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。直播间已接入 WebSocket 点赞、本场点赞榜、AC、共享 WebSocket 弹幕与历史；完整在线人数协议仍待交付。直播页面使用项目内的静态演示封面，桌面布局为头像旁点赞数、左画面、右上榜单与右下聊天；手机纵向排列。审核拒绝只短提示，未知结果从简洁状态入口核对，不展示待发送列表或数量。
 
 HTTP 客户端请求超时为 5 秒，离开页面取消未完成请求，写请求不自动重试。业务页面不显示开发连接检查，排查服务状态时直接访问 /healthz 和 /readyz；`npm run build` 生成的 dist 不包含开发代理，目前尚未接入 API 静态托管。
 
@@ -157,7 +157,7 @@ LIVESTREAM_DANMAKU_PERSISTENCE_CONSUMERS=4
 LIVESTREAM_WORKER_METRICS_ADDR=127.0.0.1:9091
 ```
 
-停旧 API/Worker 并备份后，在 backend 执行迁移 7；回到仓库根目录创建缺少的 Topic：
+停旧 API/Worker 并备份后，在 backend 执行迁移至当前版本 8；回到仓库根目录创建缺少的 Topic：
 
 ```bash
 docker compose --env-file .env -f deployments/docker/compose.yaml run --rm kafka-init

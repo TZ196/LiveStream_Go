@@ -10,6 +10,7 @@ import { SESSION_KEY, tokenExpiresAt, type Session } from './session'
 const session = shallowRef<Session>()
 const notice = ref('')
 const activePage = ref<'rooms' | 'account'>('rooms')
+const roomsVersion = ref(0)
 const restoring = ref(true)
 const restoreError = ref('')
 let expiryTimer: ReturnType<typeof setTimeout> | undefined
@@ -54,6 +55,11 @@ function endSession(message: string) {
 }
 
 function logout() { endSession('你已退出登录。') }
+function showRooms() {
+  // 从直播间返回发现页时卸载旧连接，让页面正常执行资源清理。
+  roomsVersion.value++
+  activePage.value = 'rooms'
+}
 function expireSession() { endSession('登录已失效，请重新登录。') }
 function updateUser(user: User) {
   if (session.value) session.value = { ...session.value, user }
@@ -143,7 +149,12 @@ onBeforeUnmount(() => {
       <img src="/favicon.svg" width="36" height="36" alt="" />
       <span>LiveStream</span>
     </a>
-    <span class="site-description">实时直播互动</span>
+    <nav v-if="session" class="header-navigation" aria-label="主导航">
+      <button class="header-nav-link" :aria-current="activePage === 'rooms' ? 'page' : undefined" @click="showRooms">发现直播</button>
+      <button class="header-nav-link header-account" aria-label="我的账号" :aria-current="activePage === 'account' ? 'page' : undefined" @click="activePage = 'account'"><span class="account-avatar" aria-hidden="true">{{ session.user.username.slice(0, 1).toUpperCase() }}</span><span>{{ session.user.username }}</span></button>
+      <button class="header-logout" @click="logout">退出</button>
+    </nav>
+    <span v-else class="site-description">一起分享此刻</span>
   </header>
   <main class="page-content">
     <section v-if="restoring || restoreError" class="account-card" aria-label="恢复登录">
@@ -158,12 +169,7 @@ onBeforeUnmount(() => {
     </section>
     <template v-else-if="session">
       <p v-if="notice" class="form-message" role="status">{{ notice }}</p>
-      <nav class="session-nav" aria-label="主导航">
-        <button class="retry-button" :aria-current="activePage === 'rooms' ? 'page' : undefined" @click="activePage = 'rooms'">直播间</button>
-        <button class="retry-button" :aria-current="activePage === 'account' ? 'page' : undefined" @click="activePage = 'account'">我的账号</button>
-        <button class="retry-button" @click="logout">退出登录</button>
-      </nav>
-      <RoomsPage v-if="activePage === 'rooms'" :token="session.access_token" :user-id="session.user.id" @expired="expireSession" />
+      <RoomsPage v-if="activePage === 'rooms'" :key="roomsVersion" :token="session.access_token" :user-id="session.user.id" @expired="expireSession" />
       <AccountPage v-else :user="session.user" :token="session.access_token"
         @logout="logout" @expired="expireSession" @updated="updateUser" />
     </template>
