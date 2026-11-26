@@ -21,3 +21,9 @@
 将 origin/main 的新版直播页面融入最近缓存分支：聊天面板保留新版样式、实时飘字及审核提示，上拉分页使用原有消息锚点并保留 Redis 最近缓存查询；缓存恢复与提示计时器分别清理。本轮执行前端 `npm run type-check`、`npm run build`，以及本地一项 Vue 状态测试（Redis 首屏、分页与实时弹幕合并）均通过。该测试按仓库规则只保留本地。
 
 后端执行 `go vet ./...`、`go test ./...` 和 API、migrate、worker 三入口构建；没有配置独立中间件，本轮跨服务用例跳过。历史隔离环境验证结果见上文。本轮未运行真实浏览器或实际滚动、触屏验证，不能将状态测试等同于 UI 验收。
+
+## 2026-11-26 最近缓存保护
+
+为本轮 Redis 集成验证临时启动 Redis 7.4.7（`127.0.0.1:16389`），在 `backend/` 运行 `$env:LIVESTREAM_TEST_REDIS_ADDR='127.0.0.1:16389'; go test -v ./internal/danmaku -run 'TestRecent(Paging|CapacityAndConflict)Integration' -count=1`：分页、场次隔离、重复写入、过期时间、恢复锁所有权、每场 300 条上限及 `event_id` 冲突保留先到内容均通过。测试后移除了本轮临时容器。
+
+后端 `gofmt`、`go vet ./...`、`go test ./...`、`go build ./cmd/api` 通过；普通 `go test` 未配置跨服务测试地址，MySQL/Kafka 恢复集成未在本轮执行。前端 `npm test`（1 项通过）、`npm run type-check`、`npm run build` 通过。Redis 集成测试和其他测试源码仅保留在本地，不纳入提交；未运行 race、浏览器或 Redis 故障恢复验证，也未测容量与性能。

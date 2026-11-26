@@ -39,6 +39,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
   let storageReadable = true
   let toastTimer: ReturnType<typeof setTimeout> | undefined
   let lastSubmitted = ''
+  let warmingNotice = ''
 
   function showToast(message: string) {
     clearTimeout(toastTimer)
@@ -65,6 +66,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     connectionGeneration = -1
     pending = []
     storageReadable = true
+    warmingNotice = ''
     messages.value = []
     liveMessages.value = []
     lastSubmitted = ''
@@ -117,6 +119,8 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     try {
       const result = await getRecentDanmaku(token, roomId, session, older ? cursor : '', attempt.signal)
       if (attempt.signal.aborted || session !== expected) return
+      if (warmingNotice && notice.value === warmingNotice) notice.value = ''
+      warmingNotice = ''
       clearTimeout(warmingTimer); warmingTimer = undefined; warmingAttempts = 0
       merge([...result.items].reverse(), older)
       // 缓存事件来自 Kafka 消费或已落库记录；匹配完整请求可确认接受，但不表示已落库。
@@ -127,8 +131,12 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
       save()
       schedule()
     } catch (error) {
-      if (!attempt.signal.aborted) notice.value = error instanceof Error ? error.message : '暂时无法查询弹幕历史。'
-      if (!attempt.signal.aborted && !stopped && error instanceof ApiError && error.code === 'CACHE_WARMING' && warmingAttempts < 50) {
+      const cacheWarming = error instanceof ApiError && error.code === 'CACHE_WARMING'
+      if (!attempt.signal.aborted) {
+        notice.value = error instanceof Error ? error.message : '暂时无法查询弹幕历史。'
+        warmingNotice = cacheWarming ? notice.value : ''
+      }
+      if (!attempt.signal.aborted && !stopped && cacheWarming && warmingAttempts < 50) {
         warmingAttempts++
         clearTimeout(warmingTimer)
         warmingTimer = setTimeout(() => { warmingTimer = undefined; if (!stopped && session === expected) void loadHistory(older) }, 1000)
@@ -201,6 +209,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
       available.value = data.danmaku_available === true
       if (!wasAvailable && available.value) {
         notice.value = ''
+        warmingNotice = ''
         schedule()
       }
       const generation = Number(data.connection_generation ?? 0)

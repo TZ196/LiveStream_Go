@@ -122,7 +122,14 @@ func startDanmaku(parent context.Context, db *gorm.DB, rooms *room.Service, user
 			group, err := danmaku.OpenConsumerGroup(check, cfg.Brokers, danmaku.RecentCacheGroup, cfg.RealtimeConsumers, func(context.Context, string, map[int32]int64) error { return nil })
 			done()
 			if err == nil {
-				err = group.RunObserved(ctx, recent.Add, func(_ context.Context, failed danmaku.FailedRecord) error {
+				err = group.RunObserved(ctx, func(ctx context.Context, record danmaku.Record) error {
+					err := recent.Add(ctx, record)
+					if errors.Is(err, danmaku.ErrRecentConflict) {
+						logger.Warn("danmaku_recent_conflict", "event_id", record.Event.EventID, "partition", record.Partition, "offset", record.NextOffset-1)
+						return nil
+					}
+					return err
+				}, func(_ context.Context, failed danmaku.FailedRecord) error {
 					logger.Warn("danmaku_recent_invalid", "partition", failed.Raw.Partition, "offset", failed.Raw.Offset)
 					return nil
 				}, service.Metrics)

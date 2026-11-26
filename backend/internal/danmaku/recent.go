@@ -17,10 +17,14 @@ type RecentStore struct{ client *redis.Client }
 
 func NewRecentStore(client *redis.Client) *RecentStore { return &RecentStore{client: client} }
 
+const recentMaxItems = 300
+
 //go:embed lua/recent_add.lua
 var addRecentLua string
 
 var addRecent = redis.NewScript(addRecentLua)
+
+var ErrRecentConflict = errors.New("最近弹幕缓存发现事件内容冲突")
 
 // Add 使用事件时间，重复投递不刷新已有成员的分数。
 func (store *RecentStore) Add(ctx context.Context, record Record) error {
@@ -33,7 +37,14 @@ func (store *RecentStore) Add(ctx context.Context, record Record) error {
 		return err
 	}
 	key := recentKey(record.Event.RoomID, record.Event.SessionID)
-	return addRecent.Run(ctx, store.client, []string{key, key + ":lock", key + ":ready"}, record.Event.ServerReceivedAt, string(raw)).Err()
+	result, err := addRecent.Run(ctx, store.client, []string{key, key + ":lock", key + ":ready"}, record.Event.ServerReceivedAt, string(raw), record.Event.EventID, recentMaxItems).Int()
+	if err != nil {
+		return err
+	}
+	if result == 2 {
+		return ErrRecentConflict
+	}
+	return nil
 }
 
 func recentKey(room, session string) string {
