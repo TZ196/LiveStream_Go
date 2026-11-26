@@ -1,78 +1,63 @@
-# Backend 结构
+﻿# 从源码理解后端
 
-## 目录职责
+这份导航帮助你从一次用户操作走到代码实现。它描述当前代码的位置和调用顺序；协议细节只在 [docs 设计文档](../docs/README.md) 中维护。当前是一个 Go Module、一个 API 进程和一个 Worker 进程；不是多实例部署。
 
-| 路径 | 打开这里可以看到什么 |
-| --- | --- |
-| cmd/api/main.go、likes.go、danmaku.go | main 拥有共享连接生命周期；likes 装配原点赞与恢复，danmaku 装配审核与独立消费 |
-| cmd/worker | 一个进程内两条独立的点赞/弹幕持久化循环，单业务失败不取消另一条 |
-| cmd/migrate | 数据库版本迁移命令 |
-| cmd/backfill-like-board | 维护窗口内为已有场次补建榜单 |
-| internal/httpserver | Hertz 路由、参数校验、认证和响应，middleware.go 包含访问日志与登录限流 |
-| internal/user | 注册登录、密码、用户查询及 token.go 中的 JWT 身份 |
-| internal/room | 房间权限、开关播、独立场次与数据库事务 |
-| internal/likes | event.go 的事件规则，kafka_*.go 的收发和消费组，projection.go 的 Redis 总数、个人数和榜单，persistence.go 的 MySQL 事务，initializer.go 的初始化与检查，recovery.go 的一次性检查/重建，backfill.go 的补榜 |
-| internal/realtime | manager.go 共享握手与读循环，capabilities.go 能力快照，audience.go 场次与成员，delivery.go 唯一写循环，ticket.go 票据；业务与监控归类见下表 |
-| internal/danmaku | event → service（准入）→ requests 与 lua/（Redis 状态/房间限流）→ moderation（AC）→ kafka_producer；kafka_consumer 解码、短重试与提交，persistence 事务与历史，failed_events 异常仓储，metrics 指标 |
-| internal/config、database、logging | 配置读取、GORM 连接池及结构检查、应用与框架日志 |
-| configs、migrations | 无秘密的配置样例，各版本数据库迁移及调度 |
+## 先认识入口和分层
 
-日常启动入口为 `go run ./cmd/api` 和 `go run ./cmd/worker`，先按[运行说明](../docs/deployment.md)配置环境和执行迁移。`bin/` 是可重新构建的本地输出目录。弹幕新增迁移 7、8；本次只追加 V8 异常表，迁移 1–7 不改写，原点赞恢复仍集中在 likes。
+1. [cmd/api/main.go](cmd/api/main.go)：加载配置，创建数据库、服务和共享连接管理器，启动 HTTP 服务，并安排退出。
+2. [internal/httpserver/server.go](internal/httpserver/server.go)：创建 Hertz，注册路由和中间件。Handler 校验输入、调用业务并映射响应。
+3. `internal/*/service.go`：定义业务规则。Repository 负责 GORM 查询和事务，不把 Hertz 请求上下文传入业务层。
+4. [cmd/worker/main.go](cmd/worker/main.go)：分别运行点赞与弹幕持久化消费者；一个业务失败不自动取消另一个。
+5. [cmd/migrate/main.go](cmd/migrate/main.go) 与 [migrations/migrate.go](migrations/migrate.go)：独立执行版本迁移；API/Worker 启动只检查结构，不自动迁移。
 
-`realtime` 保持一个 Go 包，以文件职责分类，共用同一套连接和锁，不额外拆出互相依赖的子包：
+实际所需数据库版本由 [database/mysql.go](internal/database/mysql.go) 的 `RequiredSchemaVersion` 决定；当前为 V9。执行迁移前先读 [迁移边界](../docs/design/database.md#迁移与版本)，不要把编写迁移等同于授权执行生产迁移。
 
-| 分类 | 文件与职责 |
-| --- | --- |
-| 公共连接 | manager.go 调度握手、读帧和生命周期；audience.go 管成员；delivery.go 管有界入队及唯一写循环；ticket.go 管票据 |
-| 公共能力 | capabilities.go 生成 ROOM_STATE、刷新两个业务能力 |
-| 弹幕 | danmaku.go 接入、响应映射和状态；danmaku_delivery.go 按场次串行分发 |
-| 点赞 | likes.go 接入、准入及恢复快照；likes_updates.go 总数推送；likes_leaderboard.go 本人与榜单推送 |
-| 监控 | metrics.go 指标；delivery_probe.go 采样投递观测 |
+## 账号与房间
 
-## 模块依赖
+注册入口是 [httpserver/auth.go](internal/httpserver/auth.go) 的 `register`，再到 [user/service.go](internal/user/service.go) 校验用户名和密码，[user/password.go](internal/user/password.go) 哈希密码，最后由 [user/repository.go](internal/user/repository.go) 写 MySQL。登录验证成功后由 [user/token.go](internal/user/token.go) 签发 JWT；后续身份由认证中间件解析。
+
+房间入口在 [httpserver/room.go](internal/httpserver/room.go)。[room/service.go](internal/room/service.go) 处理权限与状态，[room/repository.go](internal/room/repository.go) 负责事务：创建房间时建立首个场次，重新开播时建立新场次。为什么要区分长期房间与单次场次，见 [领域模型](../docs/design/domain-model.md#房间状态)。
+
+## 连接：先取得票据，再升级 WebSocket
+
+浏览器持 Bearer 调用 [httpserver/realtime.go](internal/httpserver/realtime.go) 的票据接口；[realtime/ticket.go](internal/realtime/ticket.go) 签发、核销绑定房间、场次和 Origin 的一次性票据。Hertz 将 `/ws/rooms/:id` 经 adaptor 交给 [realtime/manager.go](internal/realtime/manager.go)，后者检查票据并开始读循环。
+
+连接放在 [realtime/audience.go](internal/realtime/audience.go) 的场次对象中；[realtime/delivery.go](internal/realtime/delivery.go) 为每条连接维护有界队列和唯一写循环。队列满或写超时会关闭该慢连接，避免阻塞整场广播。连接目前在单个 API 进程内管理；**在线连接数展示和完整在线协议尚未交付**。握手、消息和限制的完整约定见 [WebSocket 协议](../docs/design/websocket-protocol.md)。
+
+## 点赞：一条请求，两个独立消费组
 
 ```text
-cmd/api → httpserver → user、room、realtime
-cmd/api → likes、danmaku、realtime、database、config、logging
-cmd/worker → likes、danmaku、database、config、logging
-cmd/migrate → migrations → database
-cmd/backfill-like-board → likes、database、config
-realtime → likes、danmaku、room、user
-likes → Kafka、Redis、GORM/MySQL
-danmaku → Kafka、Redis、GORM/MySQL、room、user
-user → GORM/MySQL、密码哈希、JWT
-room → GORM/MySQL
-database → config、GORM/MySQL
+浏览器批量点击 → WS LIKE → Kafka live.events
+                         ├─ live-realtime → Redis 投影 → 本机连接推送
+                         └─ live-persistence → MySQL 事务
 ```
 
-箭头列出主要直接依赖，外部能力按用途概括。cmd 创建具体实现，httpserver 接收请求，业务包维护规则和仓储，realtime 维护连接与场次。新增账号、房间、点赞功能时扩展对应包。本次保留点赞 Kafka 代码，在 danmaku 内实现其独立收发，避免为两个恢复边界不同的业务新增通用 messaging 框架。详细职责和并发约束见[系统架构](../docs/design/architecture.md)。
+1. [frontend/src/likes.ts](../frontend/src/likes.ts) 聚合 500 毫秒内点击，保留待确认批次；[realtime/likes.go](internal/realtime/likes.go) 校验消息并交给 Producer。
+2. [likes/event.go](internal/likes/event.go) 构造稳定事件身份；[likes/kafka_producer.go](internal/likes/kafka_producer.go) 等待 Broker 确认后返回。ACK 只代表 Kafka 接受，不代表广播送达或 MySQL 已落库。
+3. [cmd/api/likes.go](cmd/api/likes.go) 的 `processLike` 调用 [likes/projection.go](internal/likes/projection.go) 与 [project_like.lua](internal/likes/lua/project_like.lua)，原子去重并更新 Redis 投影。随后 [realtime/likes_updates.go](internal/realtime/likes_updates.go) 和 [realtime/likes_leaderboard.go](internal/realtime/likes_leaderboard.go) 合并并推送状态。
+4. Worker 使用 [likes/persistence.go](internal/likes/persistence.go) 在同一事务中写 `consumer_inbox`、点赞事件和检查点；成功后才提交本消费组的 Kafka 位移。两组各自接收事件，组内成员是分工，不是多 API 实例广播。
 
-## 点赞完整业务链路
+需要理解重复消息、结果未知或 Redis 重建时，再读 [可靠性设计](../docs/design/reliability.md)。
 
-1. httpserver 验证 Bearer，签发绑定用户、房间、场次和来源的一次性票据。realtime.Manager 完成握手和注册，连接写循环先发送 Redis 权威首屏。
-2. readMessages 解析 LIKE，校验场次并调用 likes.NewLikeBatch 构造稳定事件。Producer 获得 Broker 确认后，连接才收到接受 ACK。
-3. API 内的实时组读取 live.events。Consumer 对记录解码校验一次，processLike 用同一事件初始化场次投影、调用 Redis Lua，并按版本同步在线场次的总数、个人数和榜单待发状态，然后消费循环提交本组位移。
-4. 总数与个人、榜单的周期分发分别在 likes_updates.go 和 likes_leaderboard.go。delivery.go 向各连接有界入队，由每连接唯一写循环发送。个人更新只送该用户在本场的连接。
-5. Worker 的独立持久化组读取同一日志，经相同校验后，在一笔 MySQL 事务内完成 inbox 去重、业务事件和检查点。事务成功后消费循环才提交该组位移。
+## 弹幕：审核后发布，三条独立消费路径
 
-请求身份、JSON、分区键和接受规则分别由[可靠性设计](../docs/design/reliability.md)、[Kafka 契约](../docs/design/kafka-events.md)和[WebSocket 契约](../docs/design/websocket-protocol.md)维护。存储键、索引与迁移规则见[数据设计](../docs/design/database.md)。
+```text
+浏览器 WS DANMAKU → 登记/限流 → AC 审核 → Kafka live.danmaku
+                                           ├─ danmaku-realtime → 场次分发 → 本机连接
+                                           ├─ danmaku-persistence → MySQL
+                                           └─ danmaku-recent-cache → Redis 最近缓存
+```
 
-## 弹幕阅读与运行链路
+1. [realtime/danmaku.go](internal/realtime/danmaku.go) 接收消息，[danmaku/service.go](internal/danmaku/service.go) 按顺序核对原请求、登记限流、审核、冻结事件并发布。审核器由 [danmaku/moderation.go](internal/danmaku/moderation.go) 在启动时加载 [词库](configs/moderation_words.tsv)；命中时不发布 Kafka。
+2. [cmd/api/danmaku.go](cmd/api/danmaku.go) 启动实时组和最近缓存组。[realtime/danmaku_delivery.go](internal/realtime/danmaku_delivery.go) 使用每场有界队列串行分发；[danmaku/recent.go](internal/danmaku/recent.go) 维护每场 Redis ZSET，最近查询每页最多 20 条。
+3. [cmd/worker/main.go](cmd/worker/main.go) 调用 [danmaku/persistence.go](internal/danmaku/persistence.go)，将弹幕及检查点放在同一事务；弹幕依靠业务表唯一键去重，不使用点赞的 `consumer_inbox`。[failed_events.go](internal/danmaku/failed_events.go) 处理可隔离的永久异常。
+4. [httpserver/danmaku.go](internal/httpserver/danmaku.go) 暴露最近缓存与既有 MySQL 历史接口。[frontend/src/danmaku.ts](../frontend/src/danmaku.ts) 在连接后请求最近缓存；[RoomDanmaku.vue](../frontend/src/components/RoomDanmaku.vue) 处理展示和上拉分页。缓存缺失时 [recent_recovery.go](internal/danmaku/recent_recovery.go) 等待持久化屏障，再从现有 MySQL 弹幕表重建；恢复刚完成时屏障后的消费仍可能有延迟。
 
-先读 internal/danmaku/service.go，可以顺着看到：核对原请求 → 新请求原子登记和限流 → AC 审核 → 冻结原文及审核版本 → Kafka 确认。词库位于 configs/moderation_words.tsv，人工词库修改后重启 API 生效。
+V2 事件冻结服务端接收时间，供最近缓存及重建使用；V1 仍可读取，但没有可靠的服务端时间，不进入 V2 最近缓存。详细时间、分页及故障边界见 [可靠性设计](../docs/design/reliability.md#最近弹幕旁路缓存)。
 
-Kafka 的 live.danmaku 有两个独立组：API 中的 danmaku-realtime 经场次串行队列向连接入队；Worker 中的 danmaku-persistence 在一笔事务保存消息及检查点。历史 HTTP 直接调用弹幕 Repository，不再经过 Kafka。前端 realtime.ts 只拥有一条连接，likes.ts 和 danmaku.ts 分别维护各自的待确认队列。
+## 遇到故障时从哪里看
 
-点赞恢复只暂停点赞，保留共享连接；新的 ROOM_STATE 更新能力和投影代次。弹幕词库、消费者或持久化循环失败只暂停相应路径；Redis 整体不可用则两个依赖 Redis 的业务都可能受影响。验收与限制见[弹幕报告](../docs/verification/reports/danmaku.md)。
-
-## Kafka、Redis、MySQL 故障恢复边界
-
-Kafka 发布超时保留结果未确认，客户端重试原始请求。弹幕永久坏消息有限重试后，通过 failed_events 可靠隔离再继续；隔离失败或依赖故障仍停止本组，核对 Topic 身份和存储检查点后重建。点赞继续沿用原恢复流程。两个业务的消费组独立运行。
-
-Redis 已更新而内存等锁超时，会保留未提交的 Kafka 位置。重放通过事件标记取得当前计数，再补齐在线快照。正常重启逐分区检查计数、榜单和去重依据，保留完整数据。身份、场次投影或进度缺失时停止后端接收，Worker 追平后按[恢复设计](../docs/design/reliability.md#redis-丢失后的恢复步骤)在新代次重建。前端持续采集并暂存，取得同场首屏后补发。backfill-like-board 处理的是已有投影的历史榜单补建。
-
-MySQL 事务失败时 inbox、事件和检查点一起回滚，重试依靠原事件身份去重。弹幕 Worker 的异常记录也与检查点同事务，事务已成功而 Kafka 提交失败时可重新读取。恢复不建立任务表或断点续建；点赞状态独立于普通 API 就绪。点赞异常隔离及关房在途完成屏障的进度见[项目状态](../docs/status.md)，实际验证见[弹幕报告](../docs/verification/reports/danmaku.md)。
-
-## 本地验证文件
-
-按用户要求，`*_test.go`、frontend/tests/ 和测试产物仅保留本地并被 Git 忽略。新检出仓库可构建程序，但没有这些本地测试用例；`go test` 输出 no test files 不表示执行了测试。现有报告中的历史测试命令依赖当时的本地源码和隔离环境，不是远程可直接运行的交付物。历史 HTTP 的限流、并发和缓存保护按用户要求暂缓，查询路径保持原样。
+- 发布结果未知：看 [danmaku/service.go](internal/danmaku/service.go) 的 `Submit` 和 [可靠性设计](../docs/design/reliability.md#弹幕登记审核与结果核对)；重试不能随意更换请求 ID。
+- 点赞 Redis 丢失：看 [likes/recovery.go](internal/likes/recovery.go)，它在检查依据和 Worker 进度后重建投影；不是简单清零继续消费。
+- Kafka 或 MySQL 故障：看 [likes/kafka_consumer.go](internal/likes/kafka_consumer.go)、[danmaku/kafka_consumer.go](internal/danmaku/kafka_consumer.go) 和两条持久化路径。业务事务或可靠隔离成功后才推进相应组位移。
+- 运行与验证：从 [运行说明](../docs/deployment.md) 和 [项目状态](../docs/status.md) 找实际命令与历史报告。`*_test.go` 与 `frontend/tests/` 按当前仓库规则仅保留本地；新检出的 `go test` 若显示 `no test files`，不代表执行了用例。

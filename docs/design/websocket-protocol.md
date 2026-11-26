@@ -2,6 +2,8 @@
 
 基线 V1.1，协议 version=1。当前已实现共享票据/连接、点赞与弹幕独立能力、弹幕错误帧及历史补查；完整在线人数、连接标识和自定义关闭码仍未交付。此契约负责握手、消息、连接和前端行为。请求幂等算法见 [可靠性设计](reliability.md)，握手票据签发见 [HTTP 接口](api-spec.md)。
 
+阅读路径：先看 [HTTP 票据路由](../../backend/internal/httpserver/realtime.go)和[一次性票据](../../backend/internal/realtime/ticket.go)，再看 [manager.go](../../backend/internal/realtime/manager.go) 的握手与读循环、[delivery.go](../../backend/internal/realtime/delivery.go) 的单连接写循环。消息分别进入 [点赞接入](../../backend/internal/realtime/likes.go)或[弹幕接入](../../backend/internal/realtime/danmaku.go)；浏览器连接、点赞和弹幕状态集中在 [realtime.ts](../../frontend/src/realtime.ts)、[likes.ts](../../frontend/src/likes.ts) 与 [danmaku.ts](../../frontend/src/danmaku.ts)。
+
 ## 握手及连接生命周期
 
 1. 前端带 Bearer 请求房间 ws-ticket，取得 30 秒内有效的一次性票据。

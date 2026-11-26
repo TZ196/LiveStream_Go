@@ -10,19 +10,21 @@ MySQL 访问统一使用 GORM。基础设施层由 GORM 创建连接池，再设
 
 该 WebSocket 接入组合有 [Hertz 官方支持](https://www.cloudwego.io/zh/docs/hertz/tutorials/third-party/protocol/websocket/)。依赖补丁版本在对应阶段锁定，设计选型不代表运行性能已经验证。
 
-P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport 显式指定。该实现将监听错误返回给启动入口，便于统一处理端口冲突；验证结果见 [P1a 报告](../verification/reports/p1a.md)。网络实现的性能差异尚未测量，后续 WebSocket 接入仍需单独验证。
+Hertz 通过 WithTransport 显式使用 Go 标准网络实现，使监听错误可以返回启动入口；早期检查见 [P1a 报告](../verification/reports/p1a.md)。WebSocket 现已经 adaptor 接入，连接行为的验证见[弹幕报告](../verification/reports/danmaku.md)；不同网络实现之间的性能差异尚未测量。
 
 ## 进程和数据流
 
-浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。点赞：API 校验 → live.events → live-realtime / live-persistence。弹幕：身份、Redis 登记/限流、AC、冻结 → live.danmaku → danmaku-realtime / danmaku-persistence / danmaku-recent-cache。各组独立提交，第一版不拆微服务；最近缓存组与重建流程仍需跨服务验收。
+浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。点赞：API 校验 → live.events → live-realtime / live-persistence。弹幕：身份、Redis 登记/限流、AC、冻结 → live.danmaku → danmaku-realtime / danmaku-persistence / danmaku-recent-cache。五个消费组分别维护位移；每组内的成员分担分区，不是五个独立服务。最近缓存的基本跨服务验证和未覆盖项见[验证报告](../verification/reports/recent-danmaku.md)。
+
+读代码时先看 [API 入口](../../backend/cmd/api/main.go)怎样组装依赖，再分别看[点赞启动](../../backend/cmd/api/likes.go)、[弹幕启动](../../backend/cmd/api/danmaku.go)和 [Worker 入口](../../backend/cmd/worker/main.go)。一条用户请求从路由出发如何走到事务，可沿 [后端源码导航](../../backend/ARCHITECTURE.md) 阅读。
 
 live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流，每组默认 4 个可配置成员，各自分担 16 个分区。实时成员共用同一个 API 内的连接管理器，每个活跃场次仅保留一个最高版本的待推送快照。API 每 200 毫秒广播有变化的场次总数。另一个每秒运行的任务合并名次变化，并向点赞者在本场的所有连接推送个人累计数。公共榜单按在线场次缓存最多 100 个用户名，最后一个连接离开时释放缓存。
 
-RoomHub 的连接、在线数和握手票据不经过 Kafka。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞从 P4 首次交付起以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，禁止 Producer 在发布前直接增加点赞数。点赞发布前不读写 Redis 请求记录；弹幕请求状态归其 Service 管理。事件业务时间由客户端 UUIDv7 request_id 确定。
+连接注册和握手票据不经过 Kafka；在线数是尚未交付的目标。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，Producer 不在发布前直接增加点赞数。点赞发布前不读写 Redis 请求记录；弹幕请求状态归其 Service 管理。两类事件的 `timestamp` 由客户端 UUIDv7 request_id 确定；弹幕 V2 另有冻结的服务端接收时间，供最近缓存使用。
 
 ## 模块责任
 
-WebSocket Gateway、RoomHub 和消息处理是逻辑职责。共享 realtime.Manager 由 API main 创建并最后关闭，握手与 readMessages 分派两项业务；audience/delivery 负责连接维护及入队，likes.Producer 负责发送，cmd/api/likes.go 的 processLike 协调消费。下面的职责边界用于这些实现及后续弹幕演进。
+WebSocket Gateway、RoomHub 和消息处理是逻辑职责，不是已经部署的独立网关或微服务。当前 Hertz 路由和 adaptor 在同一个 API 进程接收 HTTP/WS；共享 realtime.Manager 由 API main 创建并最后关闭，握手与 readMessages 分派两项业务；audience/delivery 负责连接维护及入队，likes.Producer 负责发送，cmd/api/likes.go 的 processLike 协调消费。
 
 | 模块或角色 | 输入与输出 | 负责 | 依赖边界 |
 | --- | --- | --- | --- |
@@ -33,7 +35,7 @@ WebSocket Gateway、RoomHub 和消息处理是逻辑职责。共享 realtime.Man
 | 令牌模块与认证中间件 | 已验证账号 → JWT；Bearer → 身份 | user/token.go 签发验签，Hertz 中间件提取并传递身份 | 不从客户端 user_id 确定身份 |
 | Room Service | 房间操作 → 房间状态 | 所有者权限、生命周期、准入锁 | Room Repository、RoomHub |
 | WebSocket Gateway | 票据握手及消息帧 → 已认证命令 | Origin、票据、读写循环、大小与心跳 | User 身份、Room Service、消息 Service |
-| RoomHub | 注册、移除、广播 → 连接队列 | 在线数、慢客户端、连接与房间清理 | 不执行数据库查询或 Kafka 发送 |
+| RoomHub（当前由 realtime.Manager 等结构承担） | 注册、移除、广播 → 连接队列 | 慢客户端、连接与房间清理；在线数仍是目标 | 不执行数据库查询或 Kafka 发送 |
 | 弹幕 Service | 已认证命令 → 接受结果 | 原请求核对、限流、AC、冻结、发布 | Repository/RequestStore、Moderator、Publisher、room/user |
 | 实时消费者 | Kafka 事件 → Redis 投影与广播 | 事件校验、投影原子更新、连续位移 | Redis、RoomHub |
 | Worker | Kafka 事件 → MySQL 事务 | inbox 去重、历史记录、检查点、异常事件 | Repository 与数据库事务 |
@@ -67,11 +69,11 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 | backend/migrations | 迁移调度与固定版本的 GORM 变更步骤，兼容已有成功记录 | P1b 起 |
 | frontend/src、frontend/package.json | Vue 工程与检查脚本 | P1a |
 | deployments/docker/compose.yaml | 统一 Compose，按阶段启用服务 | P1b 起 |
-| backend/Dockerfile | API、Worker 镜像构建 | P7 |
+| backend/Dockerfile | API、Worker 镜像构建，尚未建立 | P7 目标 |
 
 本轮按业务只增加一个 danmaku 包，原点赞及恢复归属保持。点赞代码集中在 likes，连接状态集中在 realtime，入口负责组装两者。代码阅读入口见 [Backend 结构](../../backend/ARCHITECTURE.md)，本轮基线与回归结果见 [精简重构验证](../verification/reports/backend-refactor.md)。P7 应用镜像仍待建立。
 
-当前 Kafka 循环对每条记录调用一次 DecodeLikeRecord，得到 ConsumedLike，包含已校验事件、原始 JSON、Topic 身份、分区、下一条位置和生产时间。API 的 processLike 依次完成场次初始化、Redis 原子投影和在线内存同步，Worker 回调完成持久化事务，两者成功后各自的 Consumer 才提交原记录。八天积压检查归实时投影，延迟的历史持久化按事件身份校验。场次字段和锁一起定义在 audience.go，manager.go 在同文件的 readMessages 中读取连接帧。cmd/api/likes.go 的 runRealtimeConsumer 管暂停、组回收和复查，processLike 管单条事件。
+点赞 Kafka 循环对每条记录调用 DecodeLikeRecord，得到已校验事件、Topic 身份、分区及下一条位置。API 的 processLike 依次完成场次初始化、Redis 原子投影和在线内存同步，Worker 回调完成持久化事务，两者成功后各自提交位移。场次字段和锁在 [audience.go](../../backend/internal/realtime/audience.go)，连接帧由 [manager.go](../../backend/internal/realtime/manager.go) 的 `readMessages` 读取；[cmd/api/likes.go](../../backend/cmd/api/likes.go) 的 `runRealtimeConsumer` 负责暂停和复查，`processLike` 负责单条事件。
 
 点赞保留原 Kafka 收发与恢复，弹幕在自己的包中维护独立收发与校验；Redis 和 MySQL 操作归仓储。本轮不额外建设 messaging 或审核微服务。外部依赖发生故障时沿用恢复设计中的处理、检查点和复查规则。
 
