@@ -28,15 +28,18 @@
 
 新发布的 LIKE_CLICKED 使用 schema_version=2。两个消费者同时识别版本 1 的历史单击和版本 2 的批次。未知版本按当前阶段的异常事件流程处理。
 
+新冻结的 DANMAKU_SENT 使用 schema_version=2，增加 `server_received_at`，同时保留 UUIDv7 衍生的 `timestamp` 供身份与请求窗口校验。V1 旧弹幕继续读取，但没有可靠的服务端接收时间，不放入 V2 最近缓存；既有 V1 冻结事件重试仍按 V1 发布。下方 V1 样例保留用于兼容说明。
+
 | 字段 | 类型与来源 |
 | --- | --- |
-| schema_version | DANMAKU_SENT 为 1，LIKE_CLICKED 为 1 或 2 |
+| schema_version | DANMAKU_SENT 为 1 或 2，LIKE_CLICKED 为 1 或 2 |
 | event_id | 服务端按可靠性设计生成的 UUIDv5 |
 | event_type | DANMAKU_SENT 或 LIKE_CLICKED |
 | request_id | 原业务 UUIDv7 |
 | request_hash | 原业务指纹的 64 位小写十六进制 SHA-256 |
 | room_id、session_id、user_id | 十进制字符串；来自认证与服务端校验后的场次绑定 |
 | timestamp | 从客户端生成的 UUIDv7 request_id 解析出的 Unix 毫秒；重试不变，服务端校验允许时间窗口；不等于服务器接收时间 |
+| server_received_at | 仅 DANMAKU_SENT V2：首次成功冻结的服务端接收 Unix 毫秒，重试复用；V1 不存在该字段 |
 | moderation_version | 仅弹幕必须携带；词库及规范化策略 SHA-256，64 位小写十六进制 |
 | payload | 弹幕为 content、username。点赞 v1 为 `{}`，计 1。点赞 v2 为 `{"count":5}` 形式，数量为正的 int64 |
 

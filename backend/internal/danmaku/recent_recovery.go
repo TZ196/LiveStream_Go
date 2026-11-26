@@ -110,7 +110,8 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 	if !valid {
 		return errors.New("直播场次不存在")
 	}
-	consumer, err := NewConsumer(ctx, recovery.brokers, RecentCacheGroup)
+	// 只查询 Topic 元数据，不订阅消费组，避免恢复任务抢占缓存分区。
+	consumer, err := newKafkaClient(ctx, recovery.brokers, RecentCacheGroup)
 	if err != nil {
 		return err
 	}
@@ -154,10 +155,7 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 			if err != nil {
 				return err
 			}
-			score := row.CreatedAt.UnixMilli()
-			if score > now.UnixMilli() {
-				score = now.UnixMilli()
-			}
+			score := row.ServerReceivedAt.UnixMilli()
 			values = append(values, redis.Z{Score: float64(score), Member: string(raw)})
 			lastID = row.ID
 		}
@@ -183,7 +181,7 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 // RecentBatch 限制每次读取的记录数，按主键推进恢复游标。
 func (repository *Repository) RecentBatch(ctx context.Context, room, session, after uint64, cutoff time.Time) ([]Message, error) {
 	var rows []Message
-	err := repository.db.WithContext(ctx).Where("room_id = ? AND session_id = ? AND id > ? AND created_at > ?", room, session, after, cutoff).Order("id ASC").Limit(500).Find(&rows).Error
+	err := repository.db.WithContext(ctx).Where("room_id = ? AND session_id = ? AND id > ? AND server_received_at > ?", room, session, after, cutoff).Order("id ASC").Limit(500).Find(&rows).Error
 	return rows, err
 }
 

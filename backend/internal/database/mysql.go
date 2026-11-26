@@ -74,7 +74,7 @@ func Close(db *gorm.DB) error {
 }
 
 // RequiredSchemaVersion 是当前程序需要的结构版本，新增迁移时同步更新。
-const RequiredSchemaVersion uint64 = 8
+const RequiredSchemaVersion uint64 = 9
 
 // CurrentVersion 读取成功记录，拒绝缺号、重复或从零开始的异常历史。
 func CurrentVersion(ctx context.Context, db *gorm.DB) (uint64, error) {
@@ -136,7 +136,7 @@ func CheckSchema(ctx context.Context, db *gorm.DB) error {
 			columns = "click_count"
 		}
 		if table == "danmaku_messages" {
-			columns = "event_id,request_id,request_hash,user_id,username,room_id,session_id,content,moderation_version,created_at,persisted_at"
+			columns = "event_id,request_id,request_hash,user_id,username,room_id,session_id,content,moderation_version,created_at,server_received_at,persisted_at"
 		}
 		if table == "projection_state" {
 			columns = "id,epoch,topic_id"

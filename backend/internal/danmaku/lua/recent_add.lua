@@ -2,7 +2,7 @@ if redis.call('EXISTS', KEYS[2]) == 1 then return redis.error_reply('CACHE_WARMI
 local now = redis.call('TIME')
 local ms = now[1] * 1000 + math.floor(now[2] / 1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ms - 300000)
-local score = math.min(tonumber(ARGV[1]), ms)
+local score = tonumber(ARGV[1])
 if score > ms - 300000 then
   local added = redis.call('ZADD', KEYS[1], 'NX', score, ARGV[2])
   if added == 1 then

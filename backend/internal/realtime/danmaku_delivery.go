@@ -84,9 +84,13 @@ func (manager *Manager) fanoutDanmaku(view *audience, item danmakuDelivery) erro
 	if closed {
 		return nil
 	}
+	createdAt := event.Timestamp
+	if event.ServerReceivedAt > 0 {
+		createdAt = event.ServerReceivedAt
+	}
 	raw, _ := json.Marshal(map[string]any{"version": 1, "type": "DANMAKU_BROADCAST", "event_id": event.EventID, "request_id": event.RequestID, "data": map[string]any{
 		"room_id": event.RoomID, "session_id": event.SessionID, "user_id": event.UserID, "username": event.Payload.Username, "content": event.Payload.Content,
-		"created_at": time.UnixMilli(event.Timestamp).UTC().Format("2006-01-02T15:04:05.000Z"),
+		"created_at": time.UnixMilli(createdAt).UTC().Format("2006-01-02T15:04:05.000Z"),
 	}})
 	for _, client := range clients {
 		client.delivery.Lock()
