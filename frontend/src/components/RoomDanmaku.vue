@@ -9,6 +9,7 @@ const input = ref<HTMLTextAreaElement>()
 const following = ref(true)
 const hasNew = ref(false)
 let loadingOlder = false
+let lastScrollTop = 0
 const connectionText = computed(() => !props.open ? '已结束' : connected.value && available.value ? '已连接' : '连接中')
 
 function onKey(event: KeyboardEvent) {
@@ -24,8 +25,11 @@ function submit() {
 function trackScroll() {
   const element = log.value
   if (!element || loadingOlder) return
+  const movingUp = element.scrollTop < lastScrollTop
+  lastScrollTop = element.scrollTop
   following.value = element.scrollHeight - element.scrollTop - element.clientHeight < 48
   if (following.value) hasNew.value = false
+  if (movingUp && element.scrollTop <= 20 && hasMore.value) void older()
 }
 function latest() {
   if (log.value) log.value.scrollTop = log.value.scrollHeight
@@ -34,7 +38,7 @@ function latest() {
 }
 async function older() {
   const element = log.value
-  if (!element || historyBusy.value) return
+  if (!element || loadingOlder || historyBusy.value || !hasMore.value) return
   loadingOlder = true
   following.value = false
   const height = element.scrollHeight
@@ -50,6 +54,7 @@ async function older() {
       const anchor = Array.from(element.querySelectorAll<HTMLElement>('.chat-message')).find(item => item.dataset.eventId === anchorId)
       if (anchor && anchorTop !== undefined) element.scrollTop += anchor.getBoundingClientRect().top - anchorTop
       else element.scrollTop = top + element.scrollHeight - height
+      lastScrollTop = element.scrollTop
     }
   } finally { loadingOlder = false }
 }

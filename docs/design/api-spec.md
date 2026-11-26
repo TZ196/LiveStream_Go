@@ -49,7 +49,7 @@
 | GET /api/v1/rooms/{id}/danmaku | 可选 session_id、limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | 已实现；已落库数据按 id 倒序，开放或关闭房间均可查询 |
 | GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
 
-User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、request_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照，created_at 是客户端 request_id 提供并经窗口校验的事件时间，不是可信的服务端接收时间。
+User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、request_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照。V2 的历史、实时广播和最近缓存的 created_at 是服务端接收时间；缺少该字段的 V1 旧事件仍显示客户端事件时间。
 
 创建房间未提供 HTTP 幂等键，前端禁止重复点击和自动重发。结果未知时先刷新本人房间列表进行确认，不能将网络超时直接解释为创建失败。弹幕与点赞的幂等协议仅适用于 WebSocket 业务请求。
 
@@ -139,3 +139,7 @@ API 在监听前检查 MySQL 连接、迁移版本和所需列，失败直接退
 两种探针均不要求用户身份，也不暴露配置秘密。未就绪不改变 /healthz 的存活含义；开始关闭网络监听后，客户端也可能直接收到连接失败，不能保证一定观察到 503。实际完成情况见项目状态。
 
 Vite 开发代理统一转发 /api、/ws 和健康接口。生产静态托管与 API 同源；需要额外来源时使用精确 Origin 白名单，不设置携带凭据的通配跨域规则。
+
+## 最近弹幕缓存
+
+`GET /api/v1/rooms/{id}/danmaku/recent` 使用 Bearer 认证，要求 `session_id`，可携带不透明 `cursor`。正常请求只查询 Redis 的场次缓存，每页最多返回 20 条，按缓存时间倒序，返回 `items` 和 `next_cursor`。满页可能带有游标，即使下一页为空；游标对应记录过期后分页结束。缓存未就绪时返回可重试的 `CACHE_WARMING`，由后台恢复任务按屏障读取 MySQL；普通请求不回退 MySQL。直播连接建立后前端自动读取，滚动到顶部或点击加载更多时读取下一页。缓存事件来自 Kafka 消费或 MySQL 恢复，可用匹配完整身份与内容的记录确认请求已接受，但不能证明 MySQL 已落库。

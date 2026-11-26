@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { newRequestId } from './api/likes'
-import { getDanmakuHistory, isDanmaku, type DanmakuMessage } from './api/danmaku'
-import { isRecord } from './api/http'
+import { getRecentDanmaku, isDanmaku, type DanmakuMessage } from './api/danmaku'
+import { ApiError, isRecord } from './api/http'
 import type { RoomConnection, RoomFrame } from './realtime'
 
 type Pending = {
@@ -32,6 +32,8 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
   let pending: Pending[] = []
   let timer: ReturnType<typeof setTimeout> | undefined
   let historyTimer: ReturnType<typeof setTimeout> | undefined
+  let warmingTimer: ReturnType<typeof setTimeout> | undefined
+  let warmingAttempts = 0
   let controller: AbortController | undefined
   let unsubscribe: (() => void) | undefined
   let storageReadable = true
@@ -68,6 +70,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     lastSubmitted = ''
     seen.clear()
     cursor = ''
+    clearTimeout(warmingTimer); warmingTimer = undefined; warmingAttempts = 0
     hasMore.value = false
     controller?.abort()
     historyBusy.value = false
@@ -105,16 +108,18 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
   }
   async function loadHistory(older = false) {
     if (historyBusy.value || (older && !cursor)) return
+    if (!session) { notice.value = '暂无可查询的直播场次。'; return }
     controller?.abort()
     const attempt = new AbortController()
     controller = attempt
     const expected = session
     historyBusy.value = true
     try {
-      const result = await getDanmakuHistory(token, roomId, session, older ? cursor : '', attempt.signal)
+      const result = await getRecentDanmaku(token, roomId, session, older ? cursor : '', attempt.signal)
       if (attempt.signal.aborted || session !== expected) return
+      clearTimeout(warmingTimer); warmingTimer = undefined; warmingAttempts = 0
       merge([...result.items].reverse(), older)
-      // 持久化历史是原请求已接受的可靠证据，核对原文和场次后解除未确认状态。
+      // 缓存事件来自 Kafka 消费或已落库记录；匹配完整请求可确认接受，但不表示已落库。
       pending = pending.filter(batch => !result.items.some(item => item.request_id === batch.requestId
         && item.user_id === userId && item.room_id === roomId && item.session_id === batch.sessionId && item.content === batch.content))
       cursor = result.nextCursor ?? ''
@@ -123,6 +128,11 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
       schedule()
     } catch (error) {
       if (!attempt.signal.aborted) notice.value = error instanceof Error ? error.message : '暂时无法查询弹幕历史。'
+      if (!attempt.signal.aborted && !stopped && error instanceof ApiError && error.code === 'CACHE_WARMING' && warmingAttempts < 50) {
+        warmingAttempts++
+        clearTimeout(warmingTimer)
+        warmingTimer = setTimeout(() => { warmingTimer = undefined; if (!stopped && session === expected) void loadHistory(older) }, 1000)
+      }
     } finally { if (controller === attempt) { controller = undefined; historyBusy.value = false } }
   }
   function schedule() {
@@ -248,6 +258,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     available.value = false
     clearTimeout(timer); timer = undefined
     clearTimeout(historyTimer); historyTimer = undefined
+    clearTimeout(warmingTimer); warmingTimer = undefined; warmingAttempts = 0
     clearTimeout(toastTimer); toastTimer = undefined
     toast.value = ''
     controller?.abort()

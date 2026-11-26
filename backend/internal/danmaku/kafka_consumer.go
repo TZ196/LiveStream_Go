@@ -26,13 +26,17 @@ type Consumer struct {
 
 // NewConsumer 创建一个消费组成员，并要求 live.danmaku 已存在且有稳定 Topic UUID。
 func NewConsumer(ctx context.Context, brokers []string, group string) (*Consumer, error) {
+	if group == RecentCacheGroup {
+		return newKafkaClient(ctx, brokers, group, kgo.ConsumerGroup(group), kgo.ConsumeTopics(Topic),
+			kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll(), kgo.ConsumeResetOffset(kgo.NewOffset().AfterMilli(time.Now().Add(-5*time.Minute).UnixMilli())))
+	}
 	return newKafkaClient(ctx, brokers, group, kgo.ConsumerGroup(group), kgo.ConsumeTopics(Topic),
 		kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll(), kgo.ConsumeResetOffset(kgo.NoResetOffset().AtStart()))
 }
 
 // 维护命令也要验证相同的 Topic 和分区；省略订阅选项时只查询元数据和位移，不参与组内分配。
 func newKafkaClient(ctx context.Context, brokers []string, group string, opts ...kgo.Opt) (*Consumer, error) {
-	if len(brokers) == 0 || (group != RealtimeGroup && group != PersistenceGroup) {
+	if len(brokers) == 0 || (group != RealtimeGroup && group != PersistenceGroup && group != RecentCacheGroup) {
 		return nil, errors.New("Kafka 地址或消费组无效")
 	}
 	client, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(brokers...)}, opts...)...)
@@ -282,7 +286,7 @@ func OpenConsumerGroup(ctx context.Context, brokers []string, name string, size 
 				ends, rangeErr = first.logOffsets(ctx, -1)
 				if rangeErr == nil {
 					for partition, offset := range offsets {
-						if max(offset, 0) < starts[partition] || offset > ends[partition] {
+						if !(name == RecentCacheGroup && offset < 0) && (max(offset, 0) < starts[partition] || offset > ends[partition]) {
 							rangeErr = fmt.Errorf("%w: %s 分区 %d 的消费位置超出保留日志范围", ErrBlocked, name, partition)
 							break
 						}

@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/danmaku"
@@ -12,6 +13,47 @@ import (
 func (s *Server) EnableDanmakuHistory(repository *danmaku.Repository) {
 	s.danmaku = repository
 	s.Hertz.GET("/api/v1/rooms/:id/danmaku", s.businessRequest, s.authenticate, s.danmakuHistory)
+}
+
+// EnableDanmakuRecent 提供只读取 Redis 的最近弹幕。
+func (s *Server) EnableDanmakuRecent(store *danmaku.RecentStore, recovery *danmaku.RecentRecovery) {
+	s.Hertz.GET("/api/v1/rooms/:id/danmaku/recent", s.businessRequest, s.authenticate, func(ctx context.Context, c *app.RequestContext) {
+		roomID, ok := readRoomID(c)
+		if !ok {
+			return
+		}
+		args := c.QueryArgs()
+		invalid := false
+		args.VisitAll(func(key, value []byte) {
+			if (string(key) != "cursor" && string(key) != "session_id") || len(value) == 0 || len(args.PeekAll(string(key))) != 1 {
+				invalid = true
+			}
+		})
+		cursor := string(args.Peek("cursor"))
+		session := string(args.Peek("session_id"))
+		sessionID, sessionErr := strconv.ParseUint(session, 10, 64)
+		if invalid || len(cursor) > 6000 || sessionErr != nil || sessionID == 0 || strconv.FormatUint(sessionID, 10) != session {
+			writeAPIError(c, 400, "INVALID_ARGUMENT", "分页参数无效", false)
+			return
+		}
+		room := strconv.FormatUint(roomID, 10)
+		page, err := store.Page(ctx, room, session, cursor)
+		if errors.Is(err, danmaku.ErrInvalidRecentCursor) {
+			writeAPIError(c, 400, "INVALID_CURSOR", "分页游标无效", false)
+			return
+		}
+		if errors.Is(err, danmaku.ErrCacheWarming) {
+			recovery.Trigger(room, session)
+			writeAPIError(c, 503, "CACHE_WARMING", "最近弹幕正在恢复，请稍后重试", true)
+			return
+		}
+		if err != nil {
+			writeAPIError(c, 503, "DEPENDENCY_UNAVAILABLE", "最近弹幕暂不可用", true)
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		writeData(c, 200, page)
+	})
 }
 
 func (s *Server) danmakuHistory(ctx context.Context, c *app.RequestContext) {

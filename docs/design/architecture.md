@@ -14,7 +14,7 @@ P1a 首步使用 Hertz 内置的 Go 标准网络实现，通过 WithTransport �
 
 ## 进程和数据流
 
-浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。点赞：API 校验 → live.events → live-realtime / live-persistence。弹幕：身份、Redis 登记/限流、AC、冻结 → live.danmaku → danmaku-realtime / danmaku-persistence。四组独立提交，第一版不拆微服务。
+浏览器通过 HTTP 使用用户、房间和查询服务，通过 WebSocket 提交弹幕和点赞。点赞：API 校验 → live.events → live-realtime / live-persistence。弹幕：身份、Redis 登记/限流、AC、冻结 → live.danmaku → danmaku-realtime / danmaku-persistence / danmaku-recent-cache。各组独立提交，第一版不拆微服务；最近缓存组与重建流程仍需跨服务验收。
 
 live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流，每组默认 4 个可配置成员，各自分担 16 个分区。实时成员共用同一个 API 内的连接管理器，每个活跃场次仅保留一个最高版本的待推送快照。API 每 200 毫秒广播有变化的场次总数。另一个每秒运行的任务合并名次变化，并向点赞者在本场的所有连接推送个人累计数。公共榜单按在线场次缓存最多 100 个用户名，最后一个连接离开时释放缓存。
 

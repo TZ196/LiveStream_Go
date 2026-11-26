@@ -38,12 +38,15 @@ func startDanmaku(parent context.Context, db *gorm.DB, rooms *room.Service, user
 	}
 	client := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
 	repository := danmaku.NewRepository(db)
+	recent := danmaku.NewRecentStore(client)
 	service := danmaku.NewService(danmaku.NewRequestStore(client), repository, moderator, producer, rooms, users)
 	manager.EnableDanmaku(service)
 	api.EnableDanmakuHistory(repository)
 	ctx, cancel := context.WithCancel(parent)
+	recovery := danmaku.NewRecentRecovery(ctx, recent, repository, cfg.Brokers)
+	api.EnableDanmakuRecent(recent, recovery)
 	var workers sync.WaitGroup
-	workers.Add(2)
+	workers.Add(3)
 	go func() {
 		defer workers.Done()
 		ticker := time.NewTicker(2 * time.Second)
@@ -112,5 +115,29 @@ func startDanmaku(parent context.Context, db *gorm.DB, rooms *room.Service, user
 			}
 		}
 	}()
-	return func() { cancel(); workers.Wait(); producer.Close(); _ = client.Close() }
+	go func() {
+		defer workers.Done()
+		for ctx.Err() == nil {
+			check, done := context.WithTimeout(ctx, 15*time.Second)
+			group, err := danmaku.OpenConsumerGroup(check, cfg.Brokers, danmaku.RecentCacheGroup, cfg.RealtimeConsumers, func(context.Context, string, map[int32]int64) error { return nil })
+			done()
+			if err == nil {
+				err = group.RunObserved(ctx, recent.Add, func(_ context.Context, failed danmaku.FailedRecord) error {
+					logger.Warn("danmaku_recent_invalid", "partition", failed.Raw.Partition, "offset", failed.Raw.Offset)
+					return nil
+				}, service.Metrics)
+				group.Close()
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Error("danmaku_recent_paused", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}()
+	return func() { cancel(); workers.Wait(); recovery.Close(); producer.Close(); _ = client.Close() }
 }

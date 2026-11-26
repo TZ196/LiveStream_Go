@@ -177,6 +177,9 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 		}
 		event.Payload.Username = account.Username
 		event.ModerationVersion = service.Moderator.Version
+		// 首次成功冻结时固定本次服务端接收时间；重试必须复用冻结值。
+		event.SchemaVersion = 2
+		event.ServerReceivedAt = started.UnixMilli()
 		raw, _ := json.Marshal(event)
 		if err := service.Store.Change(ctx, event, owner, "freeze", string(raw), event.ModerationVersion); err != nil {
 			return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "冻结请求正在核对", Pending: true, Retryable: true, RetryAfter: 1000}

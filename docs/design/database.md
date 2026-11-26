@@ -17,7 +17,7 @@ MySQL 查询和事务统一通过 GORM 实现，业务访问集中在 Repository
 | users | id；username VARCHAR(32) NOT NULL；password_hash VARCHAR(255) NOT NULL；created_at | PRIMARY(id)，UNIQUE(username) | P1b |
 | live_rooms | id；owner_id 外键 users；title VARCHAR(80)；status VARCHAR(16)，仅 OPEN/CLOSED；created_at；closed_at 可空 | PRIMARY(id)，(status,id)，(owner_id,id) | P2 |
 | live_sessions | id；room_id 外键 live_rooms；started_at、ended_at；当前活动状态 | PRIMARY(id)，(room_id,id)；每房间最多一个活动场次，需数据库约束与事务共同保证 | P3 |
-| danmaku_messages | id；event_id；request_id；request_hash；(room_id,session_id) 联合外键 live_sessions(room_id,id)；user_id 外键 users；username VARCHAR(32) 快照；content VARCHAR(200) utf8mb4；moderation_version；created_at 事件时间；persisted_at 数据库默认落库时间 | PRIMARY(id)，UNIQUE(event_id)，UNIQUE(user_id,request_id)，(room_id,id)，(room_id,session_id,id) | V7 弹幕 |
+| danmaku_messages | id；event_id；request_id；request_hash；(room_id,session_id) 联合外键 live_sessions(room_id,id)；user_id 外键 users；username VARCHAR(32) 快照；content VARCHAR(200) utf8mb4；moderation_version；created_at 客户端事件时间；server_received_at 可空服务端接收时间；persisted_at 数据库默认落库时间 | PRIMARY(id)，UNIQUE(event_id)，UNIQUE(user_id,request_id)，(room_id,id)，(room_id,session_id,id) | V7 弹幕、V9 接收时间 |
 | interaction_events | id；event_id；room_id 外键 live_rooms；session_id 外键 live_sessions；user_id 外键 users；event_type，仅 LIKE_CLICKED；click_count BIGINT NOT NULL DEFAULT 1，CHECK 大于 0；created_at；persisted_at | PRIMARY(id)，UNIQUE(event_id)，(session_id,id) | P4 |
 
 表内业务字段除明确可空项外均为 NOT NULL。CHECK 约束确保 OPEN 的 closed_at 为空、CLOSED 的 closed_at 非空。接口校验不代替唯一约束和数据库事务。
@@ -126,7 +126,7 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
-独立迁移命令依次补齐版本 1–8。弹幕最初在 main/c800921 上新增 V7，本次仅追加 V8，版本 1–7 原样保留。V6 升级先停旧 API/Worker 并备份，执行迁移后启用新程序；V7 不复制或清空原数据，不提供自动删表回滚，失败核对实际 DDL 后以前向修复处理。旧二进制拒绝高版本，回退应用需先完成兼容评估。版本 6 仅新增 projection_state 空表，首次启用点赞时兼容现有固定配置代次，随后按数据库有效代次启动。升级前停止旧进程并备份；该版本不改写业务数据。旧程序要求版本 5，升级后应使用新版本并以前向修复处理故障。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5、6 迁移，已有点赞投影时先完成[本场榜单补建](../deployment.md#已有点赞数据升级到本场榜单)，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
+独立迁移命令依次补齐版本 1–9。弹幕最初在 main/c800921 上新增 V7，随后追加 V8 和 V9，已成功版本原样保留。V6 升级先停旧 API/Worker 并备份，执行迁移后启用新程序；V7 不复制或清空原数据，不提供自动删表回滚，失败核对实际 DDL 后以前向修复处理。旧二进制拒绝高版本，回退应用需先完成兼容评估。版本 6 仅新增 projection_state 空表，首次启用点赞时兼容现有固定配置代次，随后按数据库有效代次启动。升级前停止旧进程并备份；该版本不改写业务数据。旧程序要求版本 5，升级后应使用新版本并以前向修复处理故障。由版本 4 升级时，先停旧 API、Worker 并备份，然后执行版本 5、6 迁移，已有点赞投影时先完成[本场榜单补建](../deployment.md#已有点赞数据升级到本场榜单)，再启动支持两种事件格式的新版 API、Worker。保留原 Kafka Topic、消费组位移、Redis 投影代次与去重记录。旧程序不认识新批次事件，一旦开始写入新批次，应以前向修复恢复服务。
 
 命令通过 GORM.Connection 在同一条连接持有数据库专属 MySQL 命名锁，名称由当前库名的 SHA1 构成；同库第二个迁移命令立即失败。每条语句使用独立 GORM 查询状态，避免失败或查询条件污染下一条语句。成功、失败和取消后均尝试释放锁，随后入口关闭连接池；连接终止也会释放命名锁。[MySQL 命名锁说明](https://dev.mysql.com/doc/refman/8.4/en/locking-functions.html)
 
@@ -135,6 +135,8 @@ MySQL DDL 会隐式提交，结构变更与成功记录不是同一个可整体�
 当前 API 和 Worker 要求成功记录连续且最新版本恰好为 8，并检查用户、房间、场次、点赞、弹幕和异常表所需列；迁移命令执行结束也进行同样的只读检查。版本过旧、过新或缺列时拒绝宣告可用。该检查不是完整结构审计，索引和约束仍需独立核对。
 
 V7 升级 V8：先停止旧 API/Worker 并备份，运行独立迁移命令，再启动新程序。只新增 failed_events，不复制、清空或重算业务数据；已成功版本 1–7 不重新执行，旧版程序会拒绝版本 8。失败时核对实际 DDL 与成功记录，再以前向修复处理，不提供自动删表降级。旧用户级限流键无需搬迁，停止旧 API 后启用房间级新键，旧键自然在二十秒内过期；切换瞬间额度重新开始，不能混跑两种限流口径的 API。
+
+V8 升级 V9：停止旧 API 和 Worker、备份后运行独立迁移。V9 仅添加可空 `server_received_at`，不回填旧事件；旧事件缺少可信接收时间，仍可读和持久化，但不进入新版最近缓存。新程序先启动支持 V1/V2 的消费者，再恢复新版 API 发送 V2；旧消费者无法解析 V2，禁止混跑。升级后旧程序会拒绝 V9，故障优先前向修复；回退需单独评估事件和数据兼容，不能靠删除列消除已写入的 V2 Kafka 事件。
 
 按 P1b 用户、P2 房间、P3 场次、P4 点赞事件、P6 恢复表逐次追加 Go Migration，不修改已应用版本。新增编号文件、在调度 switch 注册步骤，并同步 internal/database/mysql.go 的 RequiredSchemaVersion；每次说明前置版本、数据影响与前向修复条件。业务约束更新同步领域模型、协议和验收；备份与日志删除不在普通 Migration 授权之内。
 

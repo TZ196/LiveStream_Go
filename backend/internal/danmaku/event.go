@@ -21,6 +21,7 @@ import (
 const Topic = "live.danmaku"
 const RealtimeGroup = "danmaku-realtime"
 const PersistenceGroup = "danmaku-persistence"
+const RecentCacheGroup = "danmaku-recent-cache"
 
 // Event 是审核通过后冻结的弹幕；发布重试不能更换任何业务字段。
 type Event struct {
@@ -35,6 +36,7 @@ type Event struct {
 	Payload           Payload `json:"payload"`
 	ModerationVersion string  `json:"moderation_version"`
 	Timestamp         int64   `json:"timestamp"`
+	ServerReceivedAt  int64   `json:"server_received_at,omitempty"`
 }
 
 type Payload struct {
@@ -143,7 +145,8 @@ func DecodeRecord(raw *kgo.Record, topicID string) (Record, error) {
 	if event.Payload.Username == "" || len(event.Payload.Username) > 32 || !utf8.ValidString(event.Payload.Username) {
 		return Record{}, errors.New("用户名快照无效")
 	}
-	if event.SchemaVersion != 1 || event.EventType != "DANMAKU_SENT" || event.EventID != expected.EventID || event.RequestHash != expected.RequestHash || event.Timestamp != expected.Timestamp || string(raw.Key) != event.Key() {
+	validVersion := (event.SchemaVersion == 1 && event.ServerReceivedAt == 0) || (event.SchemaVersion == 2 && event.ServerReceivedAt > 0 && time.UnixMilli(event.ServerReceivedAt).UTC().Year() <= 9999)
+	if !validVersion || event.EventType != "DANMAKU_SENT" || event.EventID != expected.EventID || event.RequestHash != expected.RequestHash || event.Timestamp != expected.Timestamp || string(raw.Key) != event.Key() {
 		return Record{}, fmt.Errorf("%w: 事件外壳、时间、指纹或分区键不匹配", ErrConflict)
 	}
 	var received time.Time

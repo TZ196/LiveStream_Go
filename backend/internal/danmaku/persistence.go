@@ -18,26 +18,32 @@ type Repository struct{ db *gorm.DB }
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
 type Message struct {
-	ID                uint64    `json:"id,string"`
-	EventID           string    `json:"event_id"`
-	RequestID         string    `json:"request_id"`
-	RequestHash       string    `json:"-"`
-	UserID            uint64    `json:"user_id,string"`
-	Username          string    `json:"username"`
-	RoomID            uint64    `json:"room_id,string"`
-	SessionID         uint64    `json:"session_id,string"`
-	Content           string    `json:"content"`
-	ModerationVersion string    `json:"-"`
-	CreatedAt         time.Time `json:"created_at"`
-	PersistedAt       time.Time `json:"-" gorm:"type:datetime(3);default:CURRENT_TIMESTAMP(3)"`
+	ID                uint64     `json:"id,string"`
+	EventID           string     `json:"event_id"`
+	RequestID         string     `json:"request_id"`
+	RequestHash       string     `json:"-"`
+	UserID            uint64     `json:"user_id,string"`
+	Username          string     `json:"username"`
+	RoomID            uint64     `json:"room_id,string"`
+	SessionID         uint64     `json:"session_id,string"`
+	Content           string     `json:"content"`
+	ModerationVersion string     `json:"-"`
+	CreatedAt         time.Time  `json:"created_at"`
+	ServerReceivedAt  *time.Time `json:"-" gorm:"type:datetime(3)"`
+	PersistedAt       time.Time  `json:"-" gorm:"type:datetime(3);default:CURRENT_TIMESTAMP(3)"`
 }
 
 func (Message) TableName() string { return "danmaku_messages" }
 
 func (message Message) Event() Event {
-	return Event{SchemaVersion: 1, EventID: message.EventID, EventType: "DANMAKU_SENT", RequestID: message.RequestID, RequestHash: message.RequestHash,
+	event := Event{SchemaVersion: 1, EventID: message.EventID, EventType: "DANMAKU_SENT", RequestID: message.RequestID, RequestHash: message.RequestHash,
 		UserID: strconv.FormatUint(message.UserID, 10), RoomID: strconv.FormatUint(message.RoomID, 10), SessionID: strconv.FormatUint(message.SessionID, 10),
 		Payload: Payload{Username: message.Username, Content: message.Content}, ModerationVersion: message.ModerationVersion, Timestamp: message.CreatedAt.UnixMilli()}
+	if message.ServerReceivedAt != nil {
+		event.SchemaVersion = 2
+		event.ServerReceivedAt = message.ServerReceivedAt.UnixMilli()
+	}
+	return event
 }
 
 func sameEvent(first, second Event) bool { return first == second }
@@ -61,6 +67,11 @@ func (repository *Repository) Persist(ctx context.Context, record Record) error 
 	}
 	event := record.Event
 	createdAt := time.UnixMilli(event.Timestamp).UTC()
+	var receivedAt *time.Time
+	if event.ServerReceivedAt > 0 {
+		value := time.UnixMilli(event.ServerReceivedAt).UTC()
+		receivedAt = &value
+	}
 	// 异常时间可能在 MySQL 驱动发送前就被拒绝，应按坏数据隔离，不能误当成断连。
 	if createdAt.Year() < 1000 || createdAt.Year() > 9999 {
 		return fmt.Errorf("%w: 事件时间超出 MySQL 日期范围", ErrInvalidEvent)
@@ -80,6 +91,7 @@ func (repository *Repository) Persist(ctx context.Context, record Record) error 
 			Content:           event.Payload.Content,
 			ModerationVersion: event.ModerationVersion,
 			CreatedAt:         createdAt,
+			ServerReceivedAt:  receivedAt,
 		}
 		err := tx.Create(&row).Error
 		if err != nil {
@@ -203,8 +215,12 @@ func (repository *Repository) SessionBelongs(ctx context.Context, room, session 
 
 func (message Message) MarshalJSON() ([]byte, error) {
 	type alias Message
+	created := message.CreatedAt
+	if message.ServerReceivedAt != nil {
+		created = *message.ServerReceivedAt
+	}
 	return json.Marshal(struct {
 		alias
 		Created string `json:"created_at"`
-	}{alias: alias(message), Created: message.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z")})
+	}{alias: alias(message), Created: created.UTC().Format("2006-01-02T15:04:05.000Z")})
 }
