@@ -2,7 +2,11 @@
 
 基线 V1.1。点赞从 P4 首次交付即采用 Kafka；点赞已具备正常重启核验与异常数据重建；弹幕历史及 V8 持久异常隔离已接入，点赞异常隔离仍待后续阶段，阶段限制见[开发计划](../development-plan.md)。本设计采用至少一次处理和业务去重，接受确认、实时展示与数据库持久化是三个不同结果。
 
+先带着三个问题阅读：客户端重试怎样识别原操作；Kafka 重放怎样避免重复业务效果；存储丢失后如何证明可以恢复。请求登记可从 [弹幕 Service](../../backend/internal/danmaku/service.go) 和 [Redis 请求状态](../../backend/internal/danmaku/requests.go)追踪；持久化分别看[点赞事务](../../backend/internal/likes/persistence.go)和[弹幕事务](../../backend/internal/danmaku/persistence.go)；两类缓存恢复入口是 [点赞 recovery](../../backend/internal/likes/recovery.go) 与 [最近弹幕 recovery](../../backend/internal/danmaku/recent_recovery.go)。
+
 ## 请求身份与时间窗口
+
+代码入口：[弹幕事件构造](../../backend/internal/danmaku/event.go)的 `NewRequest`、[点赞事件构造](../../backend/internal/likes/event.go)的 `NewLikeBatch`。先区分客户端的 `request_id` 与服务端稳定推导的 `event_id`，再看各自的重试规则。
 
 客户端为每条弹幕和每个 500 毫秒点赞批次生成 UUIDv7 request_id。首发时冻结批次，重试保留原值与点击数。服务端要求规范小写 UUIDv7，从 UUID 的时间部分校验窗口：首次准入和重新发布时不得早于当前时间 24 小时，不得晚于当前时间 5 分钟。过旧返回 REQUEST_EXPIRED，未来偏差过大返回 CLOCK_SKEW。过期不代表原动作没有发生；已无记录可查时在后台保留未确认结果，不向前端发送 Kafka 内部未知结果，也不伪称确定失败。
 
@@ -19,6 +23,8 @@
 Producer 启用幂等及 acks=all；获得 Broker 成功确认后才能返回接受 ACK。发送超时可能已经写入，不能伪报成功或确定未发生；应用层重试保持原事件。ACK 不代表 Redis 已更新、广播已送达或 MySQL 已落库。Kafka 单节点、保留期耗尽、存储损坏或客户端丢失原请求等情况都可能造成数据丢失或未决，不承诺任何故障下无损。
 
 ## 弹幕登记、审核与结果核对
+
+沿 [Submit](../../backend/internal/danmaku/service.go) 从上到下阅读；原子登记和限流由 [begin_request.lua](../../backend/internal/danmaku/lua/begin_request.lua) 完成，审核实现在 [moderation.go](../../backend/internal/danmaku/moderation.go)。
 
 弹幕 Service 顺序为：构造并校验身份/指纹 → Redis 查原状态，缺失时查询 MySQL 最终结果 → 新请求原子限流和登记 → AC 审核 → 用户名快照及完整事件冻结 → Kafka 发布 → 接受确认。只有 Broker 确认成功或完整 SQL 明细证明原事件存在时返回 ACK。PROCESSING 不是接受证明。
 
@@ -96,6 +102,8 @@ CHECKING、READY、RECOVERING、BLOCKED 是点赞的内存状态。普通 API �
 
 ## Worker 事务与失败分类
 
+先看 [点赞 `PersistLike`](../../backend/internal/likes/persistence.go) 和[弹幕 `Persist`](../../backend/internal/danmaku/persistence.go)怎样在同一事务内写业务和检查点，再看 [Worker 回调](../../backend/cmd/worker/main.go)及消费者何时提交 Kafka 位移。两种业务的去重表不同，不能只看函数名就假设相同实现。
+
 Worker 以 event_id 在 consumer_inbox 中去重，点赞业务表必须有 event_id 唯一索引，并在同一 MySQL 事务内写入该批次的 click_count 及该分区 next_offset 检查点。重复事件需比较指纹，匹配才跳过业务写入；冲突事件隔离。事务成功后才提交 Kafka 位移；Kafka 提交失败可重新消费，数据库去重保证业务不重复。
 
 | 故障 | 处理及位移 |
@@ -115,14 +123,20 @@ V8 的“死信”落在 MySQL failed_events，当前只有弹幕接入，不增
 
 记录未知发布数、请求冲突数、处理重复数、暂停组、数据库 checkpoint、Kafka 提交位移和日志保留起点。弹幕指标新增 consumer_failures_total，按组记录 retry、quarantined、quarantine_failed、dependency_failed；日志给出隔离来源位置和错误类别，未解决记录从 failed_events 的 OPEN 行查询。弹幕有未解决隔离记录时不能以 lag=0 声称历史完整；这些记录不属于点赞恢复依据，不阻断原点赞重建。将来接入点赞隔离时，必须同时扩展其完整性审计，不能只推进检查点。
 
-MySQL 临时不可用时，依赖数据库的登录、房间变更、新握手和历史查询返回依赖错误；当前每次新发布仍查询 MySQL 场次；现有连接可保留，但不能承诺数据库整体不可用时继续接受新事件。单个 Worker 事务故障与数据库整体停机应分开验证。房间状态由本 API 修改，关闭事务失败不改变已有状态。Worker 独立暂停，其恢复不要求 API 重建在线连接。
+MySQL 临时不可用时，依赖数据库的登录、房间变更、新握手和 MySQL 历史查询会受影响；当前每次新发布仍查询 MySQL 场次。已就绪的 Redis 最近弹幕查询本身不访问 MySQL；若缓存缺失，后台重建依赖 MySQL，因此不能保证恢复成功。现有连接可保留，但不能承诺数据库整体不可用时继续接受新事件。单个 Worker 事务故障与数据库整体停机应分开验证。房间状态由本 API 修改，关闭事务失败不改变已有状态。Worker 独立暂停，其恢复不要求 API 重建在线连接。
 
 验收通过 [IDEM、KAFKA 和 REC 案例](../verification/plan.md) 建立。具体可执行脚本随实现提供，本设计不代表故障演练已经执行。
 
 ## 最近弹幕旁路缓存
 
+先看 [recent.go](../../backend/internal/danmaku/recent.go) 怎样写入和分页，再看 [recent_recovery.go](../../backend/internal/danmaku/recent_recovery.go) 怎样取得锁、等待持久化检查点及替换缓存；HTTP 入口在 [danmaku.go](../../backend/internal/httpserver/danmaku.go)。
+
 独立 `danmaku-recent-cache` 组消费 `live.danmaku`，以场次为单位写入 Redis ZSET，分数使用冻结的服务端接收时间；原子清理五分钟前的记录，新增成员时刷新五分钟键过期。读取以成员排名分页，每次最多读取和返回 20 条。缓存只供最近展示，不是持久化证明；新消费组从最近五分钟开始，缓存消费者失败不阻断实时或持久化组。
 
+为什么不让实时广播顺手等待缓存写入：独立组有自己的消费位置，缓存写入或重试不会成为实时组的同步前置。为什么使用成员作游标：分页脚本先清理过期项，再用 `ZREVRANK` 定位上一页最旧的完整成员，并在同一个 Lua 调用中读取后续成员；新弹幕插入不会让一个固定页号发生偏移，相同毫秒的成员也有各自位置。游标成员已过期时当前实现结束分页；满 20 条时可能给出游标，下一页仍可能为空。实现见 [recent_page.lua](../../backend/internal/danmaku/lua/recent_page.lua) 和 [recent.go](../../backend/internal/danmaku/recent.go)。
+
 场次 READY 标志区分已初始化的空缓存和需要重建的缓存。缓存缺失时返回 `CACHE_WARMING`，最多四个后台任务跨场次运行；同场次用带期限的 Redis 锁合并重建请求。持锁期间缓存消费组暂停该场次写入，但不暂停广播。重建先记录 Topic UUID 与各分区末端，等待 MySQL 的弹幕持久化检查点追平并检查未解决隔离记录，然后分页读取已有弹幕表写入临时 ZSET。只有锁仍有效才原子替换并设 READY；锁过期的任务不可提交。屏障之后的事件由缓存消费组重试补入，因此恢复刚完成时仍可能存在短暂消费延迟。基本屏障和重建已在隔离环境验证，其他故障覆盖见[验证报告](../verification/reports/recent-danmaku.md)。现阶段缓存没有总量上限，内存占用取决于五分钟内各场次事件数量，容量尚未测量。
+
+等待屏障是因为 Kafka 接受后 Worker 仍可能积压；若直接查 MySQL，会遗漏尚未持久化的事件。重建期间禁止该场次的缓存写入，是为了避免临时 ZSET 替换正式键时覆盖新消息；[recent_add.lua](../../backend/internal/danmaku/lua/recent_add.lua) 检查锁，[recent_finish.lua](../../backend/internal/danmaku/lua/recent_finish.lua) 核对锁持有者后才切换。锁到期不会让旧任务有权覆盖新结果，但缓存组需之后重新消费被阻塞的记录。
 
 客户端 UUIDv7 时间仍用于请求身份和窗口校验，不作为最近缓存的时间。V2 在首次成功冻结事件时保存该次请求的服务端接收时间，重试沿用原值；MySQL 同样保存该值供重建，V1 由于缺少可信时间不进入最近缓存。API 主机与 Redis 的系统时间需要同步；服务器时钟发生跳变或两者存在偏差时，窗口仍会受时钟影响。该时间是请求接收时间，不是 Kafka Broker 的确认时间。

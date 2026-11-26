@@ -2,6 +2,8 @@
 
 基线 V1.1。负责 HTTP 字段、认证、错误和分页。业务口径见 [领域模型](domain-model.md)，长连接消息见 [WebSocket 协议](websocket-protocol.md)。
 
+看实现时，先从 [Hertz 路由注册](../../backend/internal/httpserver/server.go) 找入口，再分别阅读 [认证](../../backend/internal/httpserver/auth.go)、[房间](../../backend/internal/httpserver/room.go)、[实时票据与榜单](../../backend/internal/httpserver/realtime.go) 和[弹幕查询](../../backend/internal/httpserver/danmaku.go)。接口表中标记“目标”的行尚未注册，示例不是已完成的证据。
+
 ## 通用约定
 
 业务接口路径前缀为 /api/v1，JSON 使用 UTF-8。user_id、room_id、session_id、记录 id、like_count 和递增版本号均为十进制字符串，避免 JavaScript 整数精度丢失；ID 为无前导零的正整数，计数和版本可为 "0"。online_count、limit 和持续秒数为整数。HTTP 时间为 UTC RFC 3339，固定毫秒精度。
@@ -45,9 +47,11 @@
 | POST /api/v1/rooms/{id}/close | 空 JSON 对象 | Room，200 | 仅房主结束本轮直播；连续重复关闭保留本轮 closed_at |
 | POST /api/v1/rooms/{id}/reopen | 空 JSON 对象 | Room，200 | 仅房主；原房间恢复 OPEN，closed_at=null；已 OPEN 时返回当前房间 |
 | POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path、session_id，201 | 仅开放房间；规则见下文 |
+| GET /api/v1/rooms/{id}/likes-state | 无 | state、session_id、room_status，200 | 读取房间与当前场次，供点赞前端识别恢复状态 |
 | GET /api/v1/rooms/{id}/sessions/{session_id}/like-leaderboard | Bearer，无查询参数 | 本场榜单与本人累计数，200 | 登录用户可读，首次进入与补取共用 |
 | GET /api/v1/rooms/{id}/danmaku | 可选 session_id、limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | 已实现；已落库数据按 id 倒序，开放或关闭房间均可查询 |
-| GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 返回统计可用性，不将未知值伪装为零 |
+| GET /api/v1/rooms/{id}/danmaku/recent | 必需 session_id，可选 cursor | items、next_cursor，200 | 当前场次最近缓存；每次最多 20 条，详见下文 |
+| GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | **目标，尚未实现或注册**；下方示例为目标设计 |
 
 User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、request_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照。V2 的历史、实时广播和最近缓存的 created_at 是服务端接收时间；缺少该字段的 V1 旧事件仍显示客户端事件时间。
 
@@ -75,7 +79,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 
 未登录返回 401。无效场次编号或附加查询参数返回 400，房间不存在返回 404，场次已结束或与当前房间不匹配返回 409。投影或依赖不可用返回 503。成功读取且无人点赞时才返回空榜。
 
-## 统计响应
+## 统计响应（目标，尚未实现）
 
 ```json
 {
@@ -95,11 +99,11 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 }
 ```
 
-RoomStats 的以上字段均存在；场次模型交付后，session_id 与 like_count 指向同一指定场次，旧场统计不可直接并入新场。当前场次模型与点赞 WebSocket 已实现，统计 HTTP 接口仍未实现。P3 尚无点赞或投影恢复期间，like_count、projection_epoch、likes_revision 为 null，likes_available=false，在线数仍可返回；前端显示“统计暂不可用”。已初始化的零计数返回字符串 "0" 和有效投影版本。
+目标 RoomStats 将包含以上字段，session_id 与 like_count 指向同一场次，旧场统计不并入新场。该接口和在线数目前均未实现，因此示例中的字段不是当前响应。点赞能力已由已实现的 `likes-state`、榜单接口和 WebSocket 状态提供；投影不可用时不能把缺失计数当作零。
 
 ## 分页
 
-默认 limit=20，允许 1 至 100；超过范围返回 INVALID_ARGUMENT。cursor 为服务端生成的不透明 base64url 字符串，包含上页末尾 id 及绑定的过滤条件；解码后逐项校验，不直接拼接 SQL。筛选条件改变时旧游标返回 INVALID_CURSOR。
+房间列表和 MySQL 弹幕历史默认 limit=20，允许 1 至 100；超过范围返回 INVALID_ARGUMENT。cursor 为服务端生成的不透明 base64url 字符串，包含上页末尾 id 及绑定的过滤条件；解码后逐项校验，不直接拼接 SQL。筛选条件改变时旧游标返回 INVALID_CURSOR。Redis 最近缓存使用独立游标和固定最多 20 条，见[最近弹幕缓存](#最近弹幕缓存)。
 
 弹幕可按 session_id 筛选；该场次必须属于路径房间，否则返回 404。未指定时查询该房间所有场次。重复、未知或显式为空的查询参数返回 400。游标绑定 room_id 与 session_id；更改筛选需重新开始分页。弹幕以数据库自增 id 作为稳定分页位置，表示数据库插入分配顺序，不等同于严格提交顺序或 Kafka 发送顺序，不能据此推断跨客户端发送的绝对先后。next_cursor 无下一页时为 null，空页为 items=[]。实时流与历史页通过 event_id 合并。
 

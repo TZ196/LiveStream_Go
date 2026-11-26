@@ -2,6 +2,17 @@
 
 当前维护 V1.1 设计基线。设计说明目标行为，完成情况以 [项目状态](status.md) 为准，实际检查结果按阶段保存在验证报告中。
 
+## 如果你是从头学习这个项目
+
+建议按一次业务操作的路径阅读，而不是一次读完所有协议字段：
+
+1. 先看[项目状态](status.md)，知道当前实现到哪里；再看[系统架构](design/architecture.md)，区分 API、Worker 和三种中间件。
+2. 看[领域模型](design/domain-model.md)，弄清房间与一次开播场次的区别，再读[数据设计](design/database.md)中的业务表和消费表。
+3. 打开[后端源码导航](../backend/ARCHITECTURE.md)，沿“账号与房间 → 连接 → 点赞 → 弹幕”逐条从入口读到实现。遇到字段或错误码，再查 [HTTP](design/api-spec.md)、[WebSocket](design/websocket-protocol.md) 和 [Kafka](design/kafka-events.md) 专文。
+4. 最后读[可靠性设计](design/reliability.md)，理解重试、重复消费及恢复；[验证报告](#验证记录)用来区分设计、已有实现与曾经测过的行为。
+
+每份设计只维护自己的定义，源码链接是阅读入口，不要求把所有文件一次读完。在线人数、多 API 实例等未交付能力不能因为出现在目标设计里就视为已实现。
+
 ## 从哪里开始
 
 | 目的 | 阅读入口 |
@@ -34,9 +45,12 @@
 - [P1a：工程骨架](verification/reports/p1a.md)
 - [P1b：数据库与用户认证](verification/reports/p1b.md)
 - [P2：房间管理及主干合并复查](verification/reports/p2.md)
+- [Kafka 点赞 Producer 基础验证](verification/reports/kafka-producer.md)
+- [点赞链路阶段验证](verification/reports/likes-chain.md)
 - [Backend 精简重构与点赞回归](verification/reports/backend-refactor.md)
 - [点赞 Redis 正常重启与异常恢复](verification/reports/like-recovery.md)
 - [弹幕、AC 审核与双业务隔离](verification/reports/danmaku.md)
+- [最近弹幕缓存与服务端时间](verification/reports/recent-danmaku.md)
 
 ## 维护约定
 

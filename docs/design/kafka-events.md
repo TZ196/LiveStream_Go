@@ -2,6 +2,8 @@
 
 基线 V1.1。点赞从 P4 首次交付即接入 Kafka、Redis 实时消费者及 MySQL 持久化消费者；弹幕从 P5 接入独立的 live.danmaku，具体启用情况见项目状态。接受与恢复规则见 [可靠性设计](reliability.md)。
 
+先分清 Topic、消费组和组内成员：不同组各自读完整日志，组内成员分担分区。代码入口分别是 [点赞事件](../../backend/internal/likes/event.go)和[弹幕事件](../../backend/internal/danmaku/event.go)；发送及处理分别从 [点赞 Producer](../../backend/internal/likes/kafka_producer.go)、[弹幕 Producer](../../backend/internal/danmaku/kafka_producer.go)、[点赞消费者](../../backend/internal/likes/kafka_consumer.go)、[弹幕消费者](../../backend/internal/danmaku/kafka_consumer.go)追踪。
+
 ## 日志配置
 
 | 项目 | V1 默认值 |
@@ -20,7 +22,7 @@
 | danmaku-recent-cache | API 内独立消费 live.danmaku，维护场次最近五分钟 Redis 缓存；与实时组独立提交 |
 | danmaku-persistence | Worker 内默认 4 个成员，只消费 live.danmaku，保存弹幕及本组 SQL 检查点 |
 
-每组独立订阅其业务 Topic 的全部 16 个分区；点赞与弹幕不共用消费组。组内同一分区同时分给一个成员，4 个成员均衡时各负责 4 个分区。点赞和弹幕各有实时、持久化组；四组的成员数分别配置为 1–16，重启对应进程生效。每个成员串行处理和提交自己的记录，进程完成一次全组恢复检查后才开始拉取。
+每组独立订阅其业务 Topic 的全部 16 个分区；点赞与弹幕不共用消费组。组内同一分区同时分给一个成员，4 个成员均衡时各负责 4 个分区。点赞有实时和持久化两组，弹幕有实时、持久化和最近缓存三组；前四组的成员数分别配置为 1–16，最近缓存组复用弹幕实时组的成员数设置。每个成员串行处理和提交自己的记录；业务组在拉取前执行各自恢复检查，缓存组有单独的可重建边界，不能把其启动视为完整性证明。
 
 保留 Kafka 集群和 Topic 身份，禁止运行中删除重建 Topic、扩分区或更换 Key 算法。此类操作会改变恢复依据或房间分区，需要迁移设计。单节点 acks=all 不提供多副本容灾能力。
 
@@ -113,7 +115,7 @@ Kafka 记录、检查点、Redis 投影和 MySQL 历史的保留与清理必须�
 
 后续可通过 k6 测量实际重复消息比例及消费者 lag，再评估是否需要额外优化；点赞不引入发布前请求登记；弹幕登记按可靠性设计实施。
 
-## 弹幕开发分支的固定决策
+## 弹幕事件的固定决策
 
 弹幕使用 live.danmaku、danmaku-realtime、danmaku-persistence 和 danmaku-recent-cache，16 分区、各组默认 4 个成员。AC 在发布前审核；事件 payload 保存原始 content 和认证用户 username 快照，顶层 moderation_version 为词库与规范化规则的 SHA-256 版本。请求身份沿用可靠性设计。消费者不使用当前词库重新审核已接受事件。缓存组异常消息跳过，不写入持久化组隔离表；缓存组故障与恢复仍需独立验证。
 

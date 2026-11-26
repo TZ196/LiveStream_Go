@@ -2,9 +2,11 @@
 
 基线 V1.1。定义表、唯一约束、索引、Redis 键及数据生命周期。已实现 users、live_rooms、live_sessions、点赞事件、去重、检查点和投影初始化标记；点赞恢复采用简单有效代次记录，弹幕明细与历史已接入；V8 failed_events 用于弹幕两个组的持久隔离，点赞尚未接入；实际执行结果见[项目状态](../status.md)。
 
+学习顺序：先读本页业务表，理解房间与场次，再看“消费与恢复表”中为什么点赞要有 inbox、检查点。对应实现分别从 [房间 Repository](../../backend/internal/room/repository.go)、[点赞事务](../../backend/internal/likes/persistence.go)、[弹幕事务](../../backend/internal/danmaku/persistence.go)开始；迁移文件固定保留历史版本。
+
 ## 通用约定
 
-MySQL 使用 InnoDB、utf8mb4，业务时间以 UTC DATETIME(3) 存储。业务主键为 BIGINT UNSIGNED，自增值对外使用字符串。UUID 使用 CHAR(36) ASCII 二进制排序；点赞 inbox 指纹使用 BINARY(32)，弹幕 request_hash 和 moderation_version 使用 CHAR(64) ASCII 小写十六进制。用户名使用规范化小写 ASCII，建立唯一索引。
+MySQL 使用 InnoDB、utf8mb4，业务时间以 UTC DATETIME(3) 存储。业务主键为 BIGINT UNSIGNED，自增值对外使用字符串。UUID 使用 CHAR(36) ASCII 二进制排序；点赞 inbox 的 request_hash 与弹幕 request_hash、moderation_version 均使用 CHAR(64) ASCII 小写十六进制。用户名使用规范化小写 ASCII，建立唯一索引。
 
 外键限定为 RESTRICT，不级联删除事件；V1 不提供删除用户、房间或历史事件功能。所有 SQL 参数化。历史页按房间与 id 查询，不执行无上限全表返回。
 
@@ -35,18 +37,18 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 
 旧数据库没有每轮开播记录，不能推断或伪造旧场次的开始、结束和点赞归属；版本 4 为旧的 OPEN 房间创建 started_at 为 NULL 的活动场次，CLOSED 房间不补造历史场次。不得修改已成功迁移或直接删除旧数据；API、WS、事件和消费者须一起携带稳定 session_id，旧场迟到事件不增加新场计数。
 
-点赞持久化表必须对 event_id 建立独立 UNIQUE KEY；新增 session_id 并建立支持单场查询的索引（如 `(session_id, id)`）。为防止事件填写的 room_id 与 session_id 不匹配，目标 DDL 应在 live_sessions 上建立 `(room_id, id)` 唯一键，点赞事件通过 `(room_id, session_id)` 联合外键引用该键；迁移时须验证 MySQL 支持及实际约束行为。去重、业务写入和检查点在同一 MySQL 事务成功后，消费者才提交本组 offset。历史、恢复与现有房间累计语义如何迁移必须先形成可验证的方案，未完成前不能声称支持历史单场统计。
+点赞持久化表的 event_id 独立唯一，并有 `(session_id, id)` 索引。为防止 room_id 与 session_id 不匹配，V4 已在 live_sessions 上建立 `(room_id, id)` 唯一键，点赞事件使用相应联合外键；DDL 见 [V4 迁移](../../backend/migrations/000004_create_sessions_likes.go)。去重、业务写入和检查点在同一 MySQL 事务成功后，消费者才提交本组 offset。旧数据库没有场次信息的记录不能被推断成某次直播的统计。
 
 ## 消费与恢复表
 
 | 表 | 关键字段 | 约束和用途 |
 | --- | --- | --- |
-| consumer_inbox | event_id、event_type、request_id、request_hash、room_id、session_id、user_id、event_time、event_json JSON、first_topic_id、first_partition、first_offset、persisted_at | PRIMARY(event_id)；UNIQUE(user_id,request_id)；(event_time,event_id)；保存事件身份与完整冻结事件，支持跨业务表去重及恢复 |
+| consumer_inbox | event_id、event_type、request_id、request_hash、room_id、session_id、user_id、event_time、event_json JSON | PRIMARY(event_id)；UNIQUE(user_id,request_id)；当前由点赞 Worker 保存事件身份和原始事件，支持去重及恢复 |
 | worker_checkpoints | consumer_group、topic_id、partition_id、next_offset BIGINT、updated_at | PRIMARY(consumer_group,topic_id,partition_id)；与本分区业务事务一起推进；不允许回退 |
 | failed_events | consumer_group、topic_id、partition_id、record_offset、raw_key/raw_payload MEDIUMBLOB、key_hash/payload_hash、key_bytes/payload_bytes、truncated、error_code、error_message VARCHAR(512)、attempts、status、resolution_details、first_failed_at、resolved_at 可空 | PRIMARY(consumer_group,topic_id,partition_id,record_offset)；status 为 OPEN/RESOLVED；原 Key 和正文各最多保存 64 KiB；(consumer_group,status,first_failed_at) 用于处置 |
 | projection_state | id=1、epoch UUID、topic_id UUID | 单行主键与 CHECK(id=1)；保存成功启用的投影代次，不存恢复任务、屏障或执行阶段 |
 
-点赞消费所需 inbox、检查点和 interaction_events 随 P4 建立；弹幕 V7 直接以 danmaku_messages 同时保存业务和持久化去重，不复制 inbox。四个组中只有两个 Worker 组写 worker_checkpoints，按组、Topic UUID、分区独立记录。consumer_inbox、worker_checkpoints 随版本 4 建立，projection_state 随版本 6 建立，failed_events 随版本 8 建立。弹幕实时组和持久化组分别保存隔离记录；只有持久化组在隔离事务中更新自己的检查点。consumer_inbox 的 event_json 不包含密码、令牌或票据。
+点赞消费所需 inbox、检查点和 interaction_events 随 P4 建立；弹幕 V7 直接以 danmaku_messages 同时保存业务和持久化去重，不复制 inbox。五个组中只有两个 Worker 持久化组写 worker_checkpoints，按组、Topic UUID、分区独立记录。consumer_inbox、worker_checkpoints 随版本 4 建立，projection_state 随版本 6 建立，failed_events 随版本 8 建立。弹幕实时组和持久化组分别保存隔离记录；只有持久化组在隔离事务中更新自己的检查点。consumer_inbox 的 event_json 不包含密码、令牌或票据。
 
 异常原值在正常 Kafka 64 KiB 上限内完整保留；超长非法输入分别保存前 64 KiB、原字节长度及完整 SHA-256，并标记 truncated，不声称能从截断值完整重放。错误摘要最多 512 个字符。重复隔离保留原文、首次时间及人工处置结果；同一来源位置出现不同原值则回滚并报告恢复保护。运行日志只记录来源和类别，不输出原始消息。当前不增加自动修复任务、重放服务或管理界面。
 
@@ -54,7 +56,7 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 
 ## 持久化事务
 
-每分区检查点行按事务锁定。一个批次内按日志顺序写 consumer_inbox，首次事件再写相应业务表；重复事件比较 request_hash 和身份字段，匹配后跳过业务效果。任何非重复 SQL 错误不得用 INSERT IGNORE 一概吞掉。
+每个消费者成员按记录顺序处理。点赞事务先尝试写 consumer_inbox，首次事件再写点赞业务表；重复事件比较 request_hash 和身份字段，匹配后跳过业务效果。检查点通过事务内的 INSERT ... ON DUPLICATE KEY UPDATE 推进，使用 GREATEST 避免回退，并非先显式查询行锁。弹幕事务直接使用消息表的唯一约束和完整事件核对。任何非重复 SQL 错误不得用 INSERT IGNORE 一概吞掉。
 
 业务写入或异常记录落库成功后，在同一事务中更新该分区 next_offset。事务提交后提交 Kafka 位移。Kafka 提交失败重读时，inbox 唯一约束和检查点避免重复业务数据。发生分区撤销时必须等待旧分区任务退出，再允许新持有者处理。
 
@@ -70,7 +72,6 @@ V1 不建立 room_members 或 room_stats。在线连接完全由 RoomHub 管理�
 | projection:{epoch}:session:{session_id}:top | ZSET，保存排在最前的至多 100 人 | 不过期，空榜不占键 |
 | projection:{epoch}:processed:{event_id} | String，已处理标记及指纹 | 首次处理起 9 天，重复不延长 |
 | projection:{epoch}:partition:{partition_id} | String，next_offset | 不过期；随投影原子更新 |
-| ratelimit:auth:{ip_hash}:{window} | String，登录注册计数 | 60 秒窗口结束后再保留 60 秒；P4 可接入 |
 
 弹幕使用 Redis TIME 与 Lua 原子滑动窗口，每用户在每个房间每 10 秒最多登记 10 个新请求；同房间多页面共享额度，不同房间分别计数。同请求重试不重复占额度，首次审核拒绝也占一次。Lua 文件由 go:embed 嵌入，原子登记边界保持。点赞入口校验正整数 count，不按点击数限流，也不配置单批点击数上限。WebSocket 帧仍适用 8 KiB 的协议大小约束。
 
@@ -82,9 +83,11 @@ board_users 记录参与人数，board_through 记录已处理至哪个场次版
 
 握手票据、连接数和 RoomHub 不写入 Redis。密码、JWT 密钥不写入 Redis。
 
+登录注册限流当前也不写入 Redis：它在 [HTTP 中间件](../../backend/internal/httpserver/middleware.go) 内使用进程内固定窗口，按 TCP 对端地址计数；窗口切换时替换计数表。重启会清空，不适合被误认为跨实例限流。
+
 ### 弹幕请求与分发键
 
-以下为实际完整键，与点赞投影互不混用：
+以下为实际键格式，与点赞投影互不混用；表内的 user_id 等名称表示变量。其中最近缓存键的 `{room_id:session_id}` 两端大括号是实际键字符，其他行的大括号用于标记占位符；当前 Redis 为 standalone。
 
 | 键 | 内容 | 生命周期 |
 | --- | --- | --- |
@@ -94,6 +97,8 @@ board_users 记录参与人数，board_through 记录已处理至哪个场次版
 | danmaku:requests:identity | String：Redis run_id 与保护截止时间 | 不过期；实例变化按可靠性设计进入保守保护 |
 | danmaku:realtime:topic | String：弹幕 Topic UUID | 不过期，防止静默更换 Topic |
 | danmaku:realtime:{topic_id} | Hash：partition → next_offset | 不过期；本组分发后推进，不是点赞恢复依据 |
+| danmaku:recent:v2:{room_id:session_id} | ZSET：完整 V2 事件，分数为服务端接收毫秒 | 查询或写入清除五分钟前成员，新增成员刷新五分钟空闲过期；V1 不写入 |
+| danmaku:recent:v2:{room_id:session_id}:ready / :lock / :build:{token} | READY 状态、重建锁、临时 ZSET | READY 五分钟；锁 60 秒；临时键有过期保护；详见[缓存恢复](reliability.md#最近弹幕旁路缓存) |
 
 弹幕持久化遇到唯一键冲突时读取已有记录，核对完整冻结事件（包括用户名与审核版本）；一致才视为重复。明细与本分区检查点在同一事务更新，再提交 Kafka。persisted_at 由 MySQL 默认 CURRENT_TIMESTAMP(3) 填写，GORM 不发送零日期。历史不返回指纹、审核版本或内部落库时间。
 
@@ -123,6 +128,7 @@ schema_migrations 使用 version BIGINT UNSIGNED 主键及 applied_at UTC DATETI
 | 6 | [000006_projection_state.go](../../backend/migrations/000006_projection_state.go) | 保存有效点赞投影代次和 Topic UUID |
 | 7 | [000007_create_danmaku_messages.go](../../backend/migrations/000007_create_danmaku_messages.go) | 仅新增弹幕表及索引、外键、长度约束；不改写用户、场次或点赞记录 |
 | 8 | [000008_create_failed_events.go](../../backend/migrations/000008_create_failed_events.go) | 仅新增异常消息表、来源唯一键与边界约束；仅弹幕接入，不改写版本 1–7 和既有业务数据 |
+| 9 | [000009_danmaku_received_at.go](../../backend/migrations/000009_danmaku_received_at.go) | 为弹幕新增可空服务端接收时间；旧记录为 NULL，不推测回填 |
 
 版本 2 保留已有修正原因：MySQL 正则 `$` 可以匹配末尾换行之前，版本 1 的约束因此不完整。ALTER 会检查存量数据，遇到不合规记录时失败，旧约束和版本 1 保留；需先核对并决定数据修复方式，不能自动改名或删除用户。使用单条 ALTER，避免分开删除与创建约束留下空档。
 
