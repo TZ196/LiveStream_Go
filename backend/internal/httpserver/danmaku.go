@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/TZ196/LiveStream_Go/backend/internal/danmaku"
+	"github.com/TZ196/LiveStream_Go/backend/internal/user"
 	"github.com/cloudwego/hertz/pkg/app"
 )
 
@@ -17,7 +18,19 @@ func (s *Server) EnableDanmakuHistory(repository *danmaku.Repository) {
 
 // EnableDanmakuRecent 提供只读取 Redis 的最近弹幕。
 func (s *Server) EnableDanmakuRecent(store *danmaku.RecentStore, recovery *danmaku.RecentRecovery) {
+	limiter := &recentQueryLimiter{counts: make(map[uint64]int)}
 	s.Hertz.GET("/api/v1/rooms/:id/danmaku/recent", s.businessRequest, s.authenticate, func(ctx context.Context, c *app.RequestContext) {
+		value, _ := c.Get("identity")
+		identity, ok := value.(user.Identity)
+		if !ok {
+			writeAPIError(c, 401, "UNAUTHORIZED", "请先登录", false)
+			return
+		}
+		if allowed, retryAfter := limiter.allow(identity.UserID); !allowed {
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+			writeAPIError(c, 429, "RATE_LIMITED", "最近弹幕查询过于频繁，请稍后重试", true)
+			return
+		}
 		roomID, ok := readRoomID(c)
 		if !ok {
 			return
@@ -40,6 +53,10 @@ func (s *Server) EnableDanmakuRecent(store *danmaku.RecentStore, recovery *danma
 		page, err := store.Page(ctx, room, session, cursor)
 		if errors.Is(err, danmaku.ErrInvalidRecentCursor) {
 			writeAPIError(c, 400, "INVALID_CURSOR", "分页游标无效", false)
+			return
+		}
+		if errors.Is(err, danmaku.ErrRecentSessionMissing) {
+			writeAPIError(c, 404, "ROOM_NOT_FOUND", "房间中不存在该场次", false)
 			return
 		}
 		if errors.Is(err, danmaku.ErrCacheWarming) {

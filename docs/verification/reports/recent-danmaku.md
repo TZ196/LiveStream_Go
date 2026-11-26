@@ -1,4 +1,4 @@
-﻿# 最近弹幕缓存验证
+# 最近弹幕缓存验证
 
 日期：2026-11-25。测试使用本机 Docker 中新建的临时 Redis 7.4.7、MySQL 8.4.13 和 Kafka 4.0.0 容器，与原开发库隔离；Go 工具链 1.26.8、Windows amd64。未使用现有开发数据。
 
@@ -27,3 +27,7 @@
 为本轮 Redis 集成验证临时启动 Redis 7.4.7（`127.0.0.1:16389`），在 `backend/` 运行 `$env:LIVESTREAM_TEST_REDIS_ADDR='127.0.0.1:16389'; go test -v ./internal/danmaku -run 'TestRecent(Paging|CapacityAndConflict)Integration' -count=1`：分页、场次隔离、重复写入、过期时间、恢复锁所有权、每场 300 条上限及 `event_id` 冲突保留先到内容均通过。测试后移除了本轮临时容器。
 
 后端 `gofmt`、`go vet ./...`、`go test ./...`、`go build ./cmd/api` 通过；普通 `go test` 未配置跨服务测试地址，MySQL/Kafka 恢复集成未在本轮执行。前端 `npm test`（1 项通过）、`npm run type-check`、`npm run build` 通过。Redis 集成测试和其他测试源码仅保留在本地，不纳入提交；未运行 race、浏览器或 Redis 故障恢复验证，也未测容量与性能。
+
+## 2026-11-26 缓存保护补充
+
+本轮使用临时 Redis 7.4.7 与独立空 MySQL 8.4：本地用例核对 TTL 范围、过期锁不可标空、否定标记、有效空场次、延长 TTL 不延长五分钟数据窗口，以及数据库缺表时不写否定标记；分页、缓存容量和冲突用例同时运行。`go vet ./...`、`go test ./...`、三个 Go 入口构建通过；前端退避的本地测试、类型检查和构建通过。测试代码按仓库规则只留本地。Windows 环境 CGO 未启用且未发现 gcc，`go test -race` 未能执行；没有重新运行 Redis + Kafka + MySQL 全链路恢复、Redis 故障注入或热点及无效 ID 压测，不能推断容量或故障下必然可用。

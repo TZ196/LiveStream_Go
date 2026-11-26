@@ -14,8 +14,9 @@ if score > ms - 300000 then
   local added = redis.call('ZADD', KEYS[1], 'NX', score, ARGV[2])
   redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -maximum - 1)
   if added == 1 then
-    redis.call('PEXPIRE', KEYS[1], 300000)
-    if redis.call('EXISTS', KEYS[3]) == 1 then redis.call('PSETEX', KEYS[3], 300000, '1') end
+    local ttl = tonumber(ARGV[5])
+    redis.call('PEXPIRE', KEYS[1], ttl)
+    if redis.call('EXISTS', KEYS[3]) == 1 then redis.call('PSETEX', KEYS[3], ttl, '1') end
     return added
   end
 end

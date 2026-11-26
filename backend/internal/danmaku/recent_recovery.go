@@ -77,6 +77,11 @@ var releaseRecentRecoveryLua string
 
 var releaseRecentRecovery = redis.NewScript(releaseRecentRecoveryLua)
 
+//go:embed lua/recent_missing.lua
+var markRecentMissingLua string
+
+var markRecentMissing = redis.NewScript(markRecentMissingLua)
+
 // Recover 在记录 Kafka 末端后等待 MySQL 事务检查点，恢复期间阻止该场次缓存消费者写入。
 func (recovery *RecentRecovery) Recover(ctx context.Context, room, session string) error {
 	key := recentKey(room, session)
@@ -108,7 +113,15 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 		return err
 	}
 	if !valid {
-		return errors.New("直播场次不存在")
+		// 只有数据库明确确认不存在且仍持有锁时才短暂标记，故障不能写成不存在。
+		marked, err := markRecentMissing.Run(ctx, recovery.store.client, []string{lock, key + ":ready"}, token).Int()
+		if err != nil {
+			return err
+		}
+		if marked != 1 {
+			return fmt.Errorf("%w: 恢复锁已过期", ErrCacheWarming)
+		}
+		return nil
 	}
 	// 只查询 Topic 元数据，不订阅消费组，避免恢复任务抢占缓存分区。
 	consumer, err := newKafkaClient(ctx, recovery.brokers, RecentCacheGroup)
@@ -169,7 +182,7 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 			return err
 		}
 	}
-	result, err := finishRecentRecovery.Run(ctx, recovery.store.client, []string{lock, key, temp, key + ":ready"}, token).Int()
+	result, err := finishRecentRecovery.Run(ctx, recovery.store.client, []string{lock, key, temp, key + ":ready"}, token, recentTTLMillis()).Int()
 	if err != nil {
 		return err
 	}

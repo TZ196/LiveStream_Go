@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,6 +19,11 @@ type RecentStore struct{ client *redis.Client }
 func NewRecentStore(client *redis.Client) *RecentStore { return &RecentStore{client: client} }
 
 const recentMaxItems = 300
+
+// 缓存保留时间为 5 分钟加随机 0–60 秒；查询窗口仍严格限制为 5 分钟。
+func recentTTLMillis() int {
+	return 300000 + rand.IntN(60001)
+}
 
 //go:embed lua/recent_add.lua
 var addRecentLua string
@@ -37,7 +43,7 @@ func (store *RecentStore) Add(ctx context.Context, record Record) error {
 		return err
 	}
 	key := recentKey(record.Event.RoomID, record.Event.SessionID)
-	result, err := addRecent.Run(ctx, store.client, []string{key, key + ":lock", key + ":ready"}, record.Event.ServerReceivedAt, string(raw), record.Event.EventID, recentMaxItems).Int()
+	result, err := addRecent.Run(ctx, store.client, []string{key, key + ":lock", key + ":ready"}, record.Event.ServerReceivedAt, string(raw), record.Event.EventID, recentMaxItems, recentTTLMillis()).Int()
 	if err != nil {
 		return err
 	}
@@ -53,6 +59,7 @@ func recentKey(room, session string) string {
 
 var ErrCacheWarming = errors.New("最近弹幕缓存正在恢复")
 var ErrInvalidRecentCursor = errors.New("无效游标")
+var ErrRecentSessionMissing = errors.New("房间中不存在该场次")
 
 //go:embed lua/recent_page.lua
 var readRecentLua string
@@ -96,6 +103,9 @@ func (store *RecentStore) Page(ctx context.Context, room, session, cursor string
 	}
 	if len(values) == 0 || values[0] == "WARMING" {
 		return page, ErrCacheWarming
+	}
+	if values[0] == "MISSING" {
+		return page, ErrRecentSessionMissing
 	}
 	values = values[1:]
 	if len(values) == 20 {
