@@ -15,12 +15,15 @@ function requestTime(value: string) { return Number.parseInt(value.replaceAll('-
 export function useRoomDanmaku(token: string, userId: string, roomId: string, channel: RoomConnection) {
   const draft = ref('')
   const messages = ref<DanmakuMessage[]>([])
+  const liveMessages = ref<DanmakuMessage[]>([])
   const queue = ref<Pending[]>([])
   const available = ref(false)
   const notice = ref('')
+  const toast = ref('')
   const historyBusy = ref(false)
   const hasMore = ref(false)
   const length = computed(() => Array.from(draft.value).length)
+  const needsConfirmation = computed(() => queue.value.some(item => item.status === 'unconfirmed'))
   const seen = new Map<string, string>()
   let session = ''
   let connectionGeneration = -1
@@ -34,6 +37,14 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
   let controller: AbortController | undefined
   let unsubscribe: (() => void) | undefined
   let storageReadable = true
+  let toastTimer: ReturnType<typeof setTimeout> | undefined
+  let lastSubmitted = ''
+
+  function showToast(message: string) {
+    clearTimeout(toastTimer)
+    toast.value = message
+    toastTimer = setTimeout(() => { toast.value = ''; toastTimer = undefined }, 3500)
+  }
 
   function key() { return 'livestream.danmaku.' + userId + '.' + roomId + '.' + session }
   function save() {
@@ -47,11 +58,16 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
   }
   function load(next: string) {
     save()
+    clearTimeout(toastTimer); toastTimer = undefined
+    toast.value = ''
+    notice.value = ''
     session = next
     connectionGeneration = -1
     pending = []
     storageReadable = true
     messages.value = []
+    liveMessages.value = []
+    lastSubmitted = ''
     seen.clear()
     cursor = ''
     clearTimeout(warmingTimer); warmingTimer = undefined; warmingAttempts = 0
@@ -67,7 +83,8 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
           || item.sessionId !== session || typeof item.content !== 'string' || Array.from(item.content).length > 200
           || !Number.isSafeInteger(item.attempts) || Number(item.attempts) < 0 || !Number.isSafeInteger(item.dueAt)
           || !['pending', 'rejected', 'unconfirmed'].includes(String(item.status))) throw new Error('缓存记录无效')
-        pending.push(item as Pending)
+        // 兼容旧缓存：已明确拒绝的内容不再占用发送队列，也不重新显示失败列表。
+        if (item.status !== 'rejected') pending.push(item as Pending)
       }
     } catch { storageReadable = false; notice.value = '待确认弹幕缓存无法读取，原记录已保留。' }
     save()
@@ -87,6 +104,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
       additions.push(item)
     }
     messages.value = older ? [...additions, ...messages.value].slice(0, 200) : [...messages.value, ...additions].slice(-200)
+    return additions
   }
   async function loadHistory(older = false) {
     if (historyBusy.value || (older && !cursor)) return
@@ -124,7 +142,7 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     if (!head || head.status === 'unconfirmed') return
     if (Date.now() - requestTime(head.requestId) >= windowMs || head.attempts >= 5) {
       head.status = 'unconfirmed'
-      head.message = '原请求结果仍未确认，已停止自动重发。'
+      head.message = '发送结果尚未确认，请稍后核对。'
       save()
       return
     }
@@ -148,8 +166,10 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
   function sendDraft(): boolean {
     if (!draft.value.trim() || length.value > 200) { notice.value = '弹幕须为 1 至 200 个字符，不能全为空白。'; return false }
     if (!session || !available.value || !channel.connected.value) { notice.value = '弹幕暂不可用，草稿已保留。'; return false }
-    if (pending.length >= 20) { notice.value = '待确认队列已满，请先处理已有记录。'; return false }
-    pending.push({ requestId: newRequestId(), sessionId: session, content: draft.value, attempts: 0, dueAt: Date.now(), status: 'pending', message: '' })
+    if (pending.length >= 20) { notice.value = '发送较频繁，请稍候再试。'; return false }
+    const requestId = newRequestId()
+    lastSubmitted = requestId
+    pending.push({ requestId, sessionId: session, content: draft.value, attempts: 0, dueAt: Date.now(), status: 'pending', message: '' })
     draft.value = ''
     notice.value = ''
     save()
@@ -166,13 +186,12 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     save()
     schedule()
   }
-  function editRejected(id: string) {
-    const item = pending.find(value => value.requestId === id && value.status === 'rejected')
-    if (!item) return
-    draft.value = item.content
-    pending = pending.filter(value => value !== item)
-    save()
-    notice.value = '修改后点击发送，将创建新的请求。'
+  function confirmPending() {
+    const head = pending.find(item => item.status === 'unconfirmed')
+    if (!head) return
+    retry(head.requestId)
+    // 已落库的原文同样可以核对结果；不换请求 ID，也不越过队首发送。
+    void loadHistory()
   }
   function receive(frame: RoomFrame) {
     const data = frame.data
@@ -195,12 +214,16 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     }
     if (frame.type === 'DANMAKU_BROADCAST' && typeof frame.event_id === 'string' && typeof frame.request_id === 'string') {
       const item = { ...data, event_id: frame.event_id, request_id: frame.request_id }
-      if (isDanmaku(item)) merge([item])
+      if (isDanmaku(item)) {
+        const additions = merge([item])
+        if (additions.length) liveMessages.value = [...liveMessages.value, ...additions].slice(-24)
+      }
     }
     const batch = pending.find(item => item.requestId === frame.request_id)
     if (!batch) return
     if (frame.type === 'ACK' && data.status === 'accepted') {
       pending = pending.filter(item => item !== batch)
+      notice.value = ''
       save()
       schedule()
       clearTimeout(historyTimer)
@@ -208,8 +231,16 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     }
     if (frame.type === 'ERROR') {
       batch.message = typeof data.message === 'string' ? data.message : '弹幕结果需要核对。'
-      if (data.outcome === 'rejected' && data.retryable !== true) batch.status = 'rejected'
-      else if (data.retryable === true) batch.dueAt = Date.now() + Math.max(1000, Math.min(30000, Number(data.retry_after_ms) || 1000))
+      if (data.outcome === 'rejected' && data.retryable !== true) {
+        pending = pending.filter(item => item !== batch)
+        notice.value = ''
+        // 只恢复最后一次提交且尚未开始编辑的草稿，不能覆盖用户后来输入或发送的内容。
+        if (lastSubmitted === batch.requestId && draft.value === '') draft.value = batch.content
+        showToast(data.code === 'CONTENT_BLOCKED' ? '内容未通过审核，请修改后发送。' : batch.message)
+        save()
+        schedule()
+        return
+      } else if (data.retryable === true) batch.dueAt = Date.now() + Math.max(1000, Math.min(30000, Number(data.retry_after_ms) || 1000))
       else batch.status = 'unconfirmed'
       notice.value = batch.message
       save()
@@ -228,8 +259,10 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     clearTimeout(timer); timer = undefined
     clearTimeout(historyTimer); historyTimer = undefined
     clearTimeout(warmingTimer); warmingTimer = undefined; warmingAttempts = 0
+    clearTimeout(toastTimer); toastTimer = undefined
+    toast.value = ''
     controller?.abort()
     save()
   }
-  return { draft, messages, queue, available, notice, length, historyBusy, hasMore, sendDraft, loadHistory, retry, editRejected, start, stop }
+  return { draft, messages, liveMessages, queue, available, connected: channel.connected, notice, toast, length, needsConfirmation, historyBusy, hasMore, sendDraft, loadHistory, confirmPending, start, stop }
 }
