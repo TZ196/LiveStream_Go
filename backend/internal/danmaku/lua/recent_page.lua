@@ -1,5 +1,6 @@
 local ready = redis.call('GET', KEYS[2])
 if not ready or redis.call('EXISTS', KEYS[3]) == 1 then return {'WARMING'} end
+if ready == 'missing' then return {'MISSING'} end
 if ready == '1' and redis.call('EXISTS', KEYS[1]) == 0 then return {'WARMING'} end
 local now = redis.call('TIME')
 local ms = now[1] * 1000 + math.floor(now[2] / 1000)

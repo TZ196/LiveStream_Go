@@ -97,7 +97,7 @@ board_users 记录参与人数，board_through 记录已处理至哪个场次版
 | danmaku:requests:identity | String：Redis run_id 与保护截止时间 | 不过期；实例变化按可靠性设计进入保守保护 |
 | danmaku:realtime:topic | String：弹幕 Topic UUID | 不过期，防止静默更换 Topic |
 | danmaku:realtime:{topic_id} | Hash：partition → next_offset | 不过期；本组分发后推进，不是点赞恢复依据 |
-| danmaku:recent:v2:{room_id:session_id} | ZSET：完整 V2 事件，分数为服务端接收毫秒 | 查询或写入清除五分钟前成员，新增成员刷新五分钟空闲过期；V1 不写入 |
+| danmaku:recent:v2:{room_id:session_id} | ZSET：完整 V2 事件，分数为服务端接收毫秒 | 查询或写入清除五分钟前成员，每场最多保留最近 300 条；新增成员刷新五分钟空闲过期；V1 不写入 |
 | danmaku:recent:v2:{room_id:session_id}:ready / :lock / :build:{token} | READY 状态、重建锁、临时 ZSET | READY 五分钟；锁 60 秒；临时键有过期保护；详见[缓存恢复](reliability.md#最近弹幕旁路缓存) |
 
 弹幕持久化遇到唯一键冲突时读取已有记录，核对完整冻结事件（包括用户名与审核版本）；一致才视为重复。明细与本分区检查点在同一事务更新，再提交 Kafka。persisted_at 由 MySQL 默认 CURRENT_TIMESTAMP(3) 填写，GORM 不发送零日期。历史不返回指纹、审核版本或内部落库时间。

@@ -50,6 +50,31 @@ type authLimiter struct {
 	counts map[string]int
 }
 
+// 最近弹幕查询按登录用户限制，固定窗口和用户数上限避免限流器无限增长。
+// 这是单 API 进程保护阈值，不代表分布式限流或实测容量。
+type recentQueryLimiter struct {
+	mu     sync.Mutex
+	window int64
+	counts map[uint64]int
+}
+
+func (l *recentQueryLimiter) allow(userID uint64) (bool, int) {
+	now := time.Now().Unix()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	window := now / 60
+	if l.window != window {
+		l.window = window
+		l.counts = make(map[uint64]int)
+	}
+	count, exists := l.counts[userID]
+	if count >= 120 || (!exists && len(l.counts) >= 10000) {
+		return false, int(60 - now%60)
+	}
+	l.counts[userID] = count + 1
+	return true, 0
+}
+
 func (l *authLimiter) allow(ip string) (bool, int) {
 	now := time.Now().Unix()
 	l.mu.Lock()
