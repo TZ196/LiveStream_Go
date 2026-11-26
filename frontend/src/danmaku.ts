@@ -109,7 +109,8 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
     return additions
   }
   async function loadHistory(older = false) {
-    if (historyBusy.value || (older && !cursor)) return
+    // 预热期间统一约束自动刷新和手动翻页，避免其他入口绕过退避。
+    if (historyBusy.value || warmingTimer !== undefined || (older && !cursor)) return
     if (!session) { notice.value = '暂无可查询的直播场次。'; return }
     controller?.abort()
     const attempt = new AbortController()
@@ -139,7 +140,10 @@ export function useRoomDanmaku(token: string, userId: string, roomId: string, ch
       if (!attempt.signal.aborted && !stopped && cacheWarming && warmingAttempts < 50) {
         warmingAttempts++
         clearTimeout(warmingTimer)
-        warmingTimer = setTimeout(() => { warmingTimer = undefined; if (!stopped && session === expected) void loadHistory(older) }, 1000)
+        // 退避上限为 10 秒，并对每次等待加入随机抖动，分散同时进入的用户。
+        const base = Math.min(10000, 1000 * 2 ** Math.min(warmingAttempts - 1, 4))
+        const delay = Math.min(10000, Math.round(base * (0.8 + Math.random() * 0.4)))
+        warmingTimer = setTimeout(() => { warmingTimer = undefined; if (!stopped && session === expected) void loadHistory(older) }, delay)
       }
     } finally { if (controller === attempt) { controller = undefined; historyBusy.value = false } }
   }
