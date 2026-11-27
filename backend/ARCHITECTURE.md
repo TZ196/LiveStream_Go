@@ -22,7 +22,7 @@
 
 浏览器持 Bearer 调用 [httpserver/realtime.go](internal/httpserver/realtime.go) 的票据接口；[realtime/ticket.go](internal/realtime/ticket.go) 签发、核销绑定房间、场次和 Origin 的一次性票据。Hertz 将 `/ws/rooms/:id` 经 adaptor 交给 [realtime/manager.go](internal/realtime/manager.go)，后者检查票据并开始读循环。
 
-连接放在 [realtime/audience.go](internal/realtime/audience.go) 的场次对象中；[realtime/delivery.go](internal/realtime/delivery.go) 为每条连接维护有界队列和唯一写循环。队列满或写超时会关闭该慢连接，避免阻塞整场广播。连接目前在单个 API 进程内管理；**在线连接数展示和完整在线协议尚未交付**。握手、消息和限制的完整约定见 [WebSocket 协议](../docs/design/websocket-protocol.md)。
+连接放在 [realtime/audience.go](internal/realtime/audience.go) 的场次对象中，[delivery.go](internal/realtime/delivery.go) 管理单连接写队列。[ownership.go](internal/realtime/ownership.go) 用 Redis 确认账号归属，[presence.go](internal/realtime/presence.go) 替换本地连接并生成在线人数。握手、消息和配额见 [WebSocket 协议](../docs/design/websocket-protocol.md)。
 
 ## 点赞：一条请求，两个独立消费组
 

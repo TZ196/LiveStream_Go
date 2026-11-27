@@ -18,6 +18,7 @@ type ticket struct {
 	sessionID uint64
 	origin    string
 	expiresAt time.Time
+	watch     watchIntent
 }
 
 // Tickets 存储单进程短期票据，并限制尚未使用的票据数量。
@@ -30,7 +31,7 @@ type Tickets struct {
 func NewTickets() *Tickets { return &Tickets{items: make(map[[32]byte]ticket)} }
 
 // Issue 生成 30 秒有效的一次性票据，并绑定来源和身份有效期。
-func (tickets *Tickets) Issue(identity user.Identity, roomID, sessionID uint64, origin string) (string, time.Time, error) {
+func (tickets *Tickets) Issue(identity user.Identity, roomID, sessionID uint64, origin string, watch watchIntent) (string, time.Time, error) {
 	now := time.Now()
 	if identity.UserID == 0 || roomID == 0 || sessionID == 0 || origin == "" || !identity.ExpiresAt.After(now) {
 		return "", time.Time{}, errors.New("票据绑定信息无效")
@@ -53,9 +54,9 @@ func (tickets *Tickets) Issue(identity user.Identity, roomID, sessionID uint64, 
 		}
 	}
 	if len(tickets.items) >= 10000 {
-		return "", time.Time{}, errors.New("票据容量已满")
+		return "", time.Time{}, ErrTicketCapacity
 	}
-	tickets.items[key] = ticket{identity: identity, roomID: roomID, sessionID: sessionID, origin: origin, expiresAt: expires}
+	tickets.items[key] = ticket{identity: identity, roomID: roomID, sessionID: sessionID, origin: origin, expiresAt: expires, watch: watch}
 	return encoded, expires, nil
 }
 

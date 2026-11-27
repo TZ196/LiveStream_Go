@@ -11,7 +11,7 @@
 3. 打开[后端源码导航](../backend/ARCHITECTURE.md)，沿“账号与房间 → 连接 → 点赞 → 弹幕”逐条从入口读到实现。遇到字段或错误码，再查 [HTTP](design/api-spec.md)、[WebSocket](design/websocket-protocol.md) 和 [Kafka](design/kafka-events.md) 专文。
 4. 最后读[可靠性设计](design/reliability.md)，理解重试、重复消费及恢复；[验证报告](#验证记录)用来区分设计、已有实现与曾经测过的行为。
 
-每份设计只维护自己的定义，源码链接是阅读入口，不要求把所有文件一次读完。在线人数、多 API 实例等未交付能力不能因为出现在目标设计里就视为已实现。
+每份设计只维护自己的定义。单实例在线人数与切换已经实现，当前部署范围见 [项目状态](status.md)。
 
 ## 从哪里开始
 

@@ -1,6 +1,6 @@
 import { isRecord, request } from './http'
 
-export type LikeTicket = { ws_path: string; session_id: string }
+export type RoomTicket = { ws_path: string; session_id: string; watch_id: string }
 
 export type LikeState = {
   state: 'CHECKING' | 'READY' | 'RECOVERING' | 'BLOCKED'
@@ -21,14 +21,17 @@ export async function getLikeState(token: string, roomId: string, signal: AbortS
 }
 
 // 获取绑定用户和场次的一次性 WebSocket 票据。
-export async function getLikeTicket(token: string, roomId: string, signal: AbortSignal): Promise<LikeTicket> {
-  const result = await request(`/api/v1/rooms/${encodeURIComponent(roomId)}/ws-ticket`, { method: 'POST', body: {}, token, signal })
+export async function getRoomTicket(token: string, roomId: string, watchId: string, signal: AbortSignal): Promise<RoomTicket> {
+  const body = watchId ? { mode: 'resume', watch_id: watchId } : { mode: 'enter' }
+  const result = await request(`/api/v1/rooms/${encodeURIComponent(roomId)}/ws-ticket`, { method: 'POST', body, token, signal })
   if (!isRecord(result) || !isRecord(result.data) || typeof result.data.ws_path !== 'string'
     || !result.data.ws_path.startsWith(`/ws/rooms/${roomId}?ticket=`)
-    || typeof result.data.session_id !== 'string' || !/^[1-9][0-9]*$/.test(result.data.session_id)) {
+    || typeof result.data.session_id !== 'string' || !/^[1-9][0-9]*$/.test(result.data.session_id)
+    || typeof result.data.watch_id !== 'string' || !/^[0-9a-f-]{36}$/.test(result.data.watch_id)
+    || (watchId !== '' && result.data.watch_id !== watchId)) {
     throw new Error('房间连接信息无效')
   }
-  return { ws_path: result.data.ws_path, session_id: result.data.session_id }
+  return { ws_path: result.data.ws_path, session_id: result.data.session_id, watch_id: result.data.watch_id }
 }
 
 // 每个新批次产生一个 UUIDv7；重试始终使用保存在待确认列表中的原值。

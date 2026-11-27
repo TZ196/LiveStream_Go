@@ -20,7 +20,7 @@ Hertz 通过 WithTransport 显式使用 Go 标准网络实现，使监听错误�
 
 live-realtime 在持有 RoomHub 的 API Server 内运行，负责实时事件去重、Redis 点赞投影和广播。live-persistence 在 Worker 内运行，负责 MySQL 事件持久化和消费检查点；P4 非法事件暂停，P6 增加可靠隔离。两组都读取完整事件流，每组默认 4 个可配置成员，各自分担 16 个分区。实时成员共用同一个 API 内的连接管理器，每个活跃场次仅保留一个最高版本的待推送快照。API 每 200 毫秒广播有变化的场次总数。另一个每秒运行的任务合并名次变化，并向点赞者在本场的所有连接推送个人累计数。公共榜单按在线场次缓存最多 100 个用户名，最后一个连接离开时释放缓存。
 
-连接注册和握手票据不经过 Kafka；在线数是尚未交付的目标。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，Producer 不在发布前直接增加点赞数。点赞发布前不读写 Redis 请求记录；弹幕请求状态归其 Service 管理。两类事件的 `timestamp` 由客户端 UUIDv7 request_id 确定；弹幕 V2 另有冻结的服务端接收时间，供最近缓存使用。
+票据和连接归属由 API 管理，RoomHub 统计本机在线人数。MySQL 用户及房间的 HTTP 写入由 API 完成。点赞以 Kafka Broker 确认为接受边界；仅实时消费者对 Redis 点赞投影去重和累加，Worker 独立消费并落 MySQL，Producer 不在发布前直接增加点赞数。点赞发布前不读写 Redis 请求记录；弹幕请求状态归其 Service 管理。两类事件的 `timestamp` 由客户端 UUIDv7 request_id 确定；弹幕 V2 另有冻结的服务端接收时间，供最近缓存使用。
 
 ## 模块责任
 
@@ -35,7 +35,7 @@ WebSocket Gateway、RoomHub 和消息处理是逻辑职责，不是已经部署�
 | 令牌模块与认证中间件 | 已验证账号 → JWT；Bearer → 身份 | user/token.go 签发验签，Hertz 中间件提取并传递身份 | 不从客户端 user_id 确定身份 |
 | Room Service | 房间操作 → 房间状态 | 所有者权限、生命周期、准入锁 | Room Repository、RoomHub |
 | WebSocket Gateway | 票据握手及消息帧 → 已认证命令 | Origin、票据、读写循环、大小与心跳 | User 身份、Room Service、消息 Service |
-| RoomHub（当前由 realtime.Manager 等结构承担） | 注册、移除、广播 → 连接队列 | 慢客户端、连接与房间清理；在线数仍是目标 | 不执行数据库查询或 Kafka 发送 |
+| RoomHub（当前由 realtime.Manager 等结构承担） | 替换、移除、在线快照和广播 | 单实例有效账号、慢连接及房间清理 | 房间快照只读内存，归属存取由 Redis 仓库处理 |
 | 弹幕 Service | 已认证命令 → 接受结果 | 原请求核对、限流、AC、冻结、发布 | Repository/RequestStore、Moderator、Publisher、room/user |
 | 实时消费者 | Kafka 事件 → Redis 投影与广播 | 事件校验、投影原子更新、连续位移 | Redis、RoomHub |
 | Worker | Kafka 事件 → MySQL 事务 | inbox 去重、历史记录、检查点、异常事件 | Repository 与数据库事务 |
@@ -83,11 +83,12 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 
 | 项目 | 默认上限或时间 |
 | --- | --- |
-| 总/单房间/单用户连接配额 | 后续目标 1000/200/5，当前未落实 |
+| 单实例实际连接 | `LIVESTREAM_WS_MAX_CONNECTIONS` 默认 256，包含握手中、已入房和退出中 |
+| 单账号直播连接 | 一条有效连接，一次正在进行的握手 |
 | 单连接业务写队列 | 128 条消息 |
 | 弹幕每活跃场次分发队列 | 已实现 128 条，串行分发 |
 | 单连接请求处理 | 一个读循环串行调用，未实现额外 32 条请求池 |
-| 待使用握手票据 | 总计 10000 个；每用户每房间 3 个仍为后续目标 |
+| 票据 | 未使用总计 10000 个，每账号每个对齐的 10 秒窗口最多申请 6 次 |
 | 单个 WebSocket 消息 | 8 KiB |
 | 写入超时、心跳发送间隔、无响应超时 | 5 秒、20 秒、60 秒 |
 | Worker 处理 | 成员串行处理，逐条事务及提交；单条业务预算 10 秒 |
@@ -96,7 +97,7 @@ P2 沿用相同分层，在入口新增 Room Repository → Room Service。HTTP 
 
 API 的目录读写锁只保护 session_id 到场次对象的映射，取出引用后就释放。各场次用独立锁保护成员、个人计数、总数快照和榜单分发版本。每 200 毫秒由一个协程逐场取走待发总数和收件人列表，在锁外编码并入队。忙场次的工作留到下一轮，每秒的个人数与榜单广播使用同样的策略。榜单查询的缓存锁单独保护快照和昵称补全，释放后才登记场次的分发进度。
 
-关闭或回收时先标记旧对象失效，按对象身份摘除目录项，再在锁外断开连接。每条连接将状态检查和非阻塞入队串行化，写协程先发 Redis 首屏，再排空握手期间积累的消息。关房使旧对象永久失效；点赞恢复保留共享连接，以新 generation/epoch 快照过滤旧状态。
+RoomHub 的本地锁同时保护账号归属变化和人数快照。同场换窗口保留场次对象，旧连接通过本地状态停止收发，读写协程退出才归还连接名额。Redis 网络等待和 Socket 写入都在 RoomHub 本地更新的锁外。归属租约与房间统计见 [WebSocket 协议](websocket-protocol.md#握手及连接生命周期)。
 
 弹幕已采用短临界区复制连接引用，再在锁外尝试入队；快照不延长连接的业务有效期，发送与退出竞态通过退出状态及幂等清理处理。按分发顺序向同房间连接入队，不让共享 Worker 池并行打乱该房间相邻弹幕。该思路对应 [REF-03 与 ISSUE-07](../reviews/live-stream-danmaku-review.md)；对象池等分配优化待有测量依据再引入。
 

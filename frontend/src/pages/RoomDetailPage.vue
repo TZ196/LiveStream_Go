@@ -17,16 +17,17 @@ const danmaku = useRoomDanmaku(props.token, props.userId, props.roomId, channel)
 const { board, canCollect, likeCount, full, notice: likeNotice, like, start: startLikes, stop: stopLikes } = useRoomLikes(props.token, props.userId, props.roomId, channel)
 const { rows, mine, onBoard, status: boardStatus } = board
 const { liveMessages } = danmaku
-const { sessionId: activeSession } = channel
+const { sessionId: activeSession, onlineCount, watchEnded } = channel
 
-function startRoom() { startLikes(); danmaku.start(); channel.start() }
+function startRoom() { if (!watchEnded.value) { startLikes(); danmaku.start(); channel.start() } }
 function stopRoom() { channel.stop(); stopLikes(); danmaku.stop() }
+function reenterRoom() { startLikes(); danmaku.start(); channel.reenter() }
 const feedback = ref<HTMLSpanElement>()
 let pulse: Animation | undefined
 
 // 点击立即播放一次局部反馈，权威总数由服务端快照更新。
 function clickLike() {
-  if (!like() || !feedback.value) return
+  if (watchEnded.value || !like() || !feedback.value) return
   pulse?.cancel()
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   pulse = feedback.value.animate([
@@ -100,6 +101,8 @@ onMounted(() => {
   unsubscribeRoom = channel.onFrame(frame => {
     // 另一页面关房后，重连查询的结果也要更新画面，不能一直显示直播中。
     if (frame.type === 'ROOM_CLOSED' || (frame.type === 'ROOM_CONTEXT' && frame.data.room_status === 'CLOSED')) void loadRoom()
+    if (frame.type === 'CONNECTION_REPLACED' || frame.type === 'WATCH_EXPIRED') { stopLikes(); danmaku.stop() }
+    if (frame.type === 'AUTH_EXPIRED') emit('expired')
   })
   void loadRoom()
 })
@@ -114,6 +117,10 @@ onBeforeUnmount(() => { unsubscribeRoom?.(); controller?.abort(); pulse?.cancel(
       <button class="refresh-room" type="button" :disabled="busy" @click="loadRoom"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M14.8 7A6 6 0 1 0 15 11M15 3v4h-4" /></svg>刷新状态</button>
     </div>
     <p v-if="message" class="form-message" data-kind="error" role="alert">{{ message }}</p>
+    <div v-if="watchEnded && room?.status === 'OPEN'" class="watch-notice" role="status">
+      <span>{{ watchEnded === 'replaced' ? '你的账号已在其他窗口进入直播间。' : '观看连接已失效，请重新进入。' }}</span>
+      <button class="retry-button" type="button" @click="reenterRoom">重新进入</button>
+    </div>
     <div v-if="busy && !room" class="room-loading" role="status"><span class="loading-ring" />正在进入直播间…</div>
     <div v-if="room" class="live-layout">
       <article class="live-main">
@@ -123,10 +130,11 @@ onBeforeUnmount(() => { unsubscribeRoom?.(); controller?.abort(); pulse?.cancel(
             <div class="host-title-line"><h1 id="room-detail-title">{{ room.title }}</h1><span class="room-badge" :data-status="room.status">{{ room.status === 'OPEN' ? '直播中' : '已结束' }}</span></div>
             <div class="host-subline">
               <span>{{ room.owner_id === userId ? '你的直播间' : '主播 #' + room.owner_id }}</span>
+              <span v-if="room.status === 'OPEN'">在线 <strong>{{ onlineCount ?? '—' }}</strong> 人</span>
               <span v-if="room.status === 'OPEN'" class="host-likes"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M10 17.1 3.4 10.8A4.4 4.4 0 0 1 10 5a4.4 4.4 0 0 1 6.6 5.8Z" /></svg><strong>{{ likeCount ?? '—' }}</strong><span>本场点赞</span></span>
             </div>
           </div>
-          <button v-if="room.status === 'OPEN'" class="host-like-button" type="button" :disabled="!canCollect || full" aria-label="为主播点赞" @click="clickLike"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 17.1 3.4 10.8A4.4 4.4 0 0 1 10 5a4.4 4.4 0 0 1 6.6 5.8Z" /></svg><span>点赞</span><span ref="feedback" class="like-feedback" aria-hidden="true">+1</span></button>
+          <button v-if="room.status === 'OPEN'" class="host-like-button" type="button" :disabled="!canCollect || full || !!watchEnded" aria-label="为主播点赞" @click="clickLike"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M10 17.1 3.4 10.8A4.4 4.4 0 0 1 10 5a4.4 4.4 0 0 1 6.6 5.8Z" /></svg><span>点赞</span><span ref="feedback" class="like-feedback" aria-hidden="true">+1</span></button>
         </header>
         <p v-if="likeNotice" class="like-status-notice" role="status">{{ likeNotice }}</p>
         <LiveStage :key="activeSession || 'waiting'" :open="room.status === 'OPEN'" :messages="liveMessages" />
@@ -160,6 +168,7 @@ onBeforeUnmount(() => { unsubscribeRoom?.(); controller?.abort(); pulse?.cancel(
 </template>
 
 <style scoped>
+.watch-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 16px; color: #645d75; font-size: 13px; }
 .room-breadcrumb { display: flex; align-items: center; gap: 13px; margin-bottom: 22px; color: #a1a5b3; font-size: 12px; }
 .back-link, .refresh-room { display: inline-flex; align-items: center; gap: 7px; border: 0; padding: 2px 0; background: transparent; color: #888e9d; font-size: 12px; }
 .back-link:hover, .refresh-room:hover:enabled { color: var(--accent); }

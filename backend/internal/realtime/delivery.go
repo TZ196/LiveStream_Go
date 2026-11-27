@@ -26,17 +26,20 @@ func encodeFrame(kind string, data any) ([]byte, error) {
 }
 
 type connection struct {
-	socket   *websocket.Conn
-	send     chan *outbound
-	done     chan struct{}
-	delivery sync.Mutex
-	physical sync.Once
-	metrics  *deliveryMetrics
-	probe    *deliveryProbe
+	socket       *websocket.Conn
+	send         chan *outbound
+	done         chan struct{}
+	delivery     sync.Mutex
+	metrics      *deliveryMetrics
+	probe        *deliveryProbe
+	endReason    string
+	leaseUntil   time.Time
+	authUntil    time.Time
+	leaseChanged chan struct{}
 }
 
 func (m *Manager) newConnection(socket *websocket.Conn) *connection {
-	c := &connection{socket: socket, send: make(chan *outbound, 128), done: make(chan struct{}), metrics: m.metrics}
+	c := &connection{socket: socket, send: make(chan *outbound, 128), done: make(chan struct{}), metrics: m.metrics, leaseChanged: make(chan struct{}, 1)}
 	if (m.connections.Add(1)-1)%64 == 0 {
 		c.probe = &deliveryProbe{}
 	}
@@ -48,24 +51,98 @@ func (c *connection) stopLocked(reason string) {
 	select {
 	case <-c.done:
 	default:
+		c.endReason = reason
 		close(c.done)
 		c.metrics.closes.WithLabelValues(reason).Inc()
 	}
 }
 
-func (c *connection) close(reason string) {
+func (c *connection) stop(reason string) {
 	c.delivery.Lock()
 	c.stopLocked(reason)
 	c.delivery.Unlock()
-	c.physical.Do(func() { _ = c.socket.Close() })
 }
 
-// offer 在持有 delivery 时执行；队列满只唤醒已有写协程，不等待 socket.Close。
-func (c *connection) offer(msg *outbound) bool {
+func (c *connection) acceptingLocked() bool {
 	select {
 	case <-c.done:
 		return false
 	default:
+	}
+	now := time.Now()
+	if !c.authUntil.IsZero() && !c.authUntil.After(now) {
+		c.stopLocked("auth_expired")
+		return false
+	}
+	if !c.leaseUntil.IsZero() && !c.leaseUntil.After(now) {
+		c.stopLocked("lease_expired")
+		return false
+	}
+	return true
+}
+
+// 业务帧准入和连接停用用同一把短锁。通过后，在途发布可按原场次完成。
+func (c *connection) accepting() bool {
+	c.delivery.Lock()
+	defer c.delivery.Unlock()
+	return c.acceptingLocked()
+}
+
+func (c *connection) leaseDeadline() time.Time {
+	c.delivery.Lock()
+	defer c.delivery.Unlock()
+	return c.leaseUntil
+}
+
+func (c *connection) extendLease(deadline time.Time) {
+	c.delivery.Lock()
+	defer c.delivery.Unlock()
+	if !c.acceptingLocked() {
+		return
+	}
+	if c.authUntil.Before(deadline) {
+		deadline = c.authUntil
+	}
+	if !deadline.After(c.leaseUntil) {
+		return
+	}
+	c.leaseUntil = deadline
+	select {
+	case c.leaseChanged <- struct{}{}:
+	default:
+	}
+}
+
+func closeCode(reason string) int {
+	switch reason {
+	case "replaced":
+		return 4009
+	case "watch_expired":
+		return 4010
+	case "auth_expired":
+		return 4001
+	case "room_closed":
+		return 4004
+	case "shutdown":
+		return websocket.CloseServiceRestart
+	case "lease_expired", "ownership_unavailable", "queue_full", "write_timeout":
+		return websocket.CloseTryAgainLater
+	default:
+		return 0
+	}
+}
+
+func endSocket(socket *websocket.Conn, reason string) {
+	if code := closeCode(reason); code != 0 {
+		_ = socket.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(200*time.Millisecond))
+	}
+	_ = socket.Close()
+}
+
+// offer 在持有 delivery 时执行；队列满只唤醒已有写协程，不等待 socket.Close。
+func (c *connection) offer(msg *outbound) bool {
+	if !c.acceptingLocked() {
+		return false
 	}
 	if c.probe != nil {
 		c.metrics.depth.Observe(float64(len(c.send)))
@@ -107,22 +184,19 @@ func (m *Manager) sendRoomFrame(view *audience, clients []*connection, msg *outb
 	return count, last
 }
 
-// writeLoop 独占写入。已有写入由 5 秒期限约束，退出时物理关闭唤醒读协程。
-func (c *connection) writeLoop(expires time.Time, initial []byte) {
+// writeLoop 独占常规写入。退出后由同一协程从房间摘除连接，再关闭 Socket。
+func (c *connection) writeLoop(initial []byte) {
 	reason := "peer_closed"
-	defer func() {
-		c.close(reason)
-		if c.probe != nil {
-			c.expireProbe(time.Now(), true)
-		}
-	}()
-	select {
-	case <-c.done:
-		return
-	default:
-	}
+	defer func() { c.stop(reason) }()
 	write := func(kind int, data []byte) bool {
-		_ = c.socket.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if !c.accepting() {
+			return false
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		if lease := c.leaseDeadline(); lease.Before(deadline) {
+			deadline = lease
+		}
+		_ = c.socket.SetWriteDeadline(deadline)
 		err := c.socket.WriteMessage(kind, data)
 		if err == nil {
 			return true
@@ -139,8 +213,8 @@ func (c *connection) writeLoop(expires time.Time, initial []byte) {
 	}
 	ping := time.NewTicker(20 * time.Second)
 	defer ping.Stop()
-	expiry := time.NewTimer(time.Until(expires))
-	defer expiry.Stop()
+	lease := time.NewTimer(time.Until(c.leaseDeadline()))
+	defer lease.Stop()
 	for {
 		select {
 		case <-c.done:
@@ -166,9 +240,13 @@ func (c *connection) writeLoop(expires time.Time, initial []byte) {
 			if !write(websocket.PingMessage, nil) {
 				return
 			}
-		case <-expiry.C:
-			reason = "auth_expired"
-			return
+		case <-c.leaseChanged:
+			lease.Reset(time.Until(c.leaseDeadline()))
+		case <-lease.C:
+			if !c.accepting() {
+				return
+			}
+			lease.Reset(time.Until(c.leaseDeadline()))
 		case <-c.done:
 			return
 		}

@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { getLikeState, getLikeTicket } from './api/likes'
+import { getLikeState, getRoomTicket } from './api/likes'
 import { ApiError, isRecord } from './api/http'
 import { deliveryTiming } from './deliveryTiming'
 
@@ -10,6 +10,8 @@ type Listener = (frame: RoomFrame) => void
 export function useRoomConnection(token: string, roomId: string) {
   const connected = ref(false)
   const sessionId = ref('')
+  const onlineCount = ref<number | null>(null)
+  const watchEnded = ref<'replaced' | 'expired' | null>(null)
   const listeners = new Set<Listener>()
   let socket: WebSocket | undefined
   let stopped = true
@@ -20,18 +22,42 @@ export function useRoomConnection(token: string, roomId: string) {
   let timing: ReturnType<typeof deliveryTiming> | undefined
   let attempts = 0
   let generation = 0
+  // 观看编号属于页面，和浏览器共享的登录状态分开保存。
+  let watchId = ''
+  let watchSession = ''
+  let joined = false
+  let presenceInstance = ''
+  let presenceRevision = -1n
 
   function emit(frame: RoomFrame) { for (const listener of listeners) listener(frame) }
   function later(delay: number) {
     if (stopped || timer !== undefined) return
     timer = setTimeout(() => { timer = undefined; void connect() }, delay)
   }
-  function reconnect() {
+  function reconnect(minimumDelay = 0) {
     if (stopped || timer !== undefined) return
     const base = Math.min(30000, 1000 * 2 ** attempts)
     attempts = Math.min(attempts + 1, 5)
     // 每次重试分散到略有不同的时刻，避免同一批断开的客户端同时重新握手。
-    later(Math.min(30000, Math.round(base * (0.8 + Math.random() * 0.4))))
+    const delay = Math.min(30000, Math.round(base * (0.8 + Math.random() * 0.4)))
+    later(Math.max(minimumDelay, delay))
+  }
+  function acceptPresence(data: Record<string, unknown>) {
+    if (data.room_id !== roomId || data.session_id !== sessionId.value || typeof data.online_count !== 'number'
+      || !Number.isSafeInteger(data.online_count) || data.online_count < 0 || typeof data.server_instance_id !== 'string'
+      || typeof data.presence_revision !== 'string' || !/^\d+$/.test(data.presence_revision)) return
+    if (presenceInstance && data.server_instance_id !== presenceInstance) return
+    const revision = BigInt(data.presence_revision)
+    if (revision < presenceRevision) return
+    presenceInstance = data.server_instance_id
+    presenceRevision = revision
+    onlineCount.value = data.online_count
+  }
+  function endWatch(reason: 'replaced' | 'expired') {
+    watchEnded.value = reason
+    stop()
+    emit({ type: 'CONNECTION_CLOSED', data: {} })
+    emit({ type: reason === 'replaced' ? 'CONNECTION_REPLACED' : 'WATCH_EXPIRED', data: {} })
   }
   async function connect() {
     if (stopped || socket) return
@@ -41,33 +67,42 @@ export function useRoomConnection(token: string, roomId: string) {
       // 此 HTTP 接口只读 MySQL，即使点赞关闭或恢复也能取得房间和场次。
       const context = await getLikeState(token, roomId, attempt.signal)
       if (stopped || attempt.signal.aborted) return
+      if (watchId && context.session_id && context.session_id !== watchSession) { endWatch('expired'); return }
       sessionId.value = context.session_id ?? ''
       emit({ type: 'ROOM_CONTEXT', data: { ...context, session_id: context.session_id } })
       if (context.room_status === 'CLOSED' || !context.session_id) { stop(); return }
-      const ticket = await getLikeTicket(token, roomId, attempt.signal)
+      const ticket = await getRoomTicket(token, roomId, watchId, attempt.signal)
       if (stopped || attempt.signal.aborted) return
       if (ticket.session_id !== context.session_id) { reconnect(); return }
+      // 首屏可能在网络中丢失。只要尝试过握手，后续就只能带原观看编号恢复。
+      watchId = ticket.watch_id
+      watchSession = ticket.session_id
       const url = new URL(ticket.ws_path, window.location.href)
       url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(url)
       socket = ws
       generation++
       const currentGeneration = generation
+      presenceInstance = ''
+      presenceRevision = -1n
       let initialized = false
       timing = deliveryTiming(ws, context.session_id)
       timeout = setTimeout(() => { if (socket === ws) ws.close() }, 8000)
-      ws.onopen = () => { if (socket === ws) connected.value = true }
       ws.onmessage = event => {
         if (socket !== ws || stopped) return
         let message: unknown
         try { message = JSON.parse(event.data) } catch { return }
         if (!isRecord(message) || typeof message.type !== 'string' || !isRecord(message.data)) return
+        const state = message.type === 'ROOM_STATE' && message.data.room_id === roomId && message.data.session_id === sessionId.value
+        if (!state && (!initialized || message.type === 'ROOM_STATE')) return
         timing?.receive(message, performance.now())
-        if (message.type === 'ROOM_STATE' && message.data.session_id === sessionId.value) {
+        if (state) {
           clearTimeout(timeout)
           // 能收到一次首屏仍可能马上再次因队列满断开，稳定三十秒才重置退避。
           if (!initialized) {
             initialized = true
+            joined = true
+            connected.value = true
             stable = setTimeout(() => {
               stable = undefined
               if (!stopped && socket === ws) attempts = 0
@@ -76,18 +111,24 @@ export function useRoomConnection(token: string, roomId: string) {
           // generation 是连接实例，不会随同连接上的能力快照变化。
           message.data.connection_generation = currentGeneration
         }
+        if (state || message.type === 'ROOM_ONLINE_UPDATE') acceptPresence(message.data)
         emit(message as RoomFrame)
         if (message.type === 'ROOM_CLOSED') stop()
       }
-      ws.onclose = () => {
+      ws.onclose = event => {
         if (socket !== ws) return
         socket = undefined
         connected.value = false
+        onlineCount.value = null
         clearTimeout(timeout)
         clearTimeout(stable); stable = undefined
         timing?.stop()
         timing = undefined
+        if (event.code === 4009) { endWatch('replaced'); return }
+        if (event.code === 4010) { endWatch('expired'); return }
         emit({ type: 'CONNECTION_CLOSED', data: {} })
+        if (event.code === 4004) { stop(); emit({ type: 'ROOM_CLOSED', data: {} }); return }
+        if (event.code === 4001) { stop(); emit({ type: 'AUTH_EXPIRED', data: {} }); return }
         reconnect()
       }
       ws.onerror = () => { if (socket === ws) emit({ type: 'CONNECTION_ERROR', data: {} }) }
@@ -98,10 +139,13 @@ export function useRoomConnection(token: string, roomId: string) {
         stop()
         return
       }
-      reconnect()
+      if (error instanceof ApiError && error.code === 'CONNECTION_REPLACED') { endWatch(joined ? 'replaced' : 'expired'); return }
+      if (error instanceof ApiError && error.code === 'WATCH_EXPIRED') { endWatch('expired'); return }
+      reconnect(error instanceof ApiError ? error.retryAfter * 1000 : 0)
     }
   }
-  function start() { if (!stopped) return; stopped = false; void connect() }
+  function start() { if (!stopped || watchEnded.value) return; stopped = false; void connect() }
+  function reenter() { if (!stopped) return; watchEnded.value = null; attempts = 0; start() }
   function stop() {
     stopped = true
     controller?.abort()
@@ -113,12 +157,14 @@ export function useRoomConnection(token: string, roomId: string) {
     old?.close()
     timing?.stop(); timing = undefined
     connected.value = false
+    onlineCount.value = null
+    watchId = ''; watchSession = ''; joined = false
   }
   function send(type: string, requestId: string, session: string, data: Record<string, unknown>): boolean {
-    if (stopped || !socket || socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 64 * 1024 || session !== sessionId.value) return false
+    if (stopped || !connected.value || !socket || socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 64 * 1024 || session !== sessionId.value) return false
     try { socket.send(JSON.stringify({ version: 1, type, request_id: requestId, session_id: session, data })); return true } catch { return false }
   }
   function onFrame(listener: Listener) { listeners.add(listener); return () => { listeners.delete(listener) } }
-  return { connected, sessionId, start, stop, send, onFrame }
+  return { connected, sessionId, onlineCount, watchEnded, start, reenter, stop, send, onFrame }
 }
 export type RoomConnection = ReturnType<typeof useRoomConnection>

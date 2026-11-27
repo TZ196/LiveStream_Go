@@ -25,16 +25,18 @@ type audience struct {
 	revision    int64
 	pending     *likeUpdate
 	// 抓取指标时只读这三个时间点，即使场次锁被长时间持有也能观察到积压。
-	pendingSince  atomic.Pointer[time.Time]
-	sendingSince  atomic.Pointer[time.Time]
-	boardSince    atomic.Pointer[time.Time]
-	pauseNotified bool
-	people        map[string]*personalUpdate
-	dirtyPeople   map[string]*personalUpdate
-	board         publicBoard
-	wantedBoard   int64
-	sentBoard     int64
-	lastTop       []BoardRow
+	pendingSince   atomic.Pointer[time.Time]
+	sendingSince   atomic.Pointer[time.Time]
+	boardSince     atomic.Pointer[time.Time]
+	pauseNotified  bool
+	people         map[string]*personalUpdate
+	dirtyPeople    map[string]*personalUpdate
+	board          publicBoard
+	wantedBoard    int64
+	sentBoard      int64
+	lastTop        []BoardRow
+	onlineRevision uint64 // 在线变更由 Manager.presenceMu 保护。
+	onlineDirty    bool
 }
 
 // 容量为一的令牌用于互斥，消费路径可在业务期限到达时退出等待。
@@ -140,7 +142,7 @@ func (manager *Manager) register(roomID, sessionID uint64, userID string, client
 	}
 }
 
-func (manager *Manager) unregister(sessionID uint64, view *audience, userID string, client *connection) {
+func (manager *Manager) removeClient(sessionID uint64, view *audience, userID string, client *connection) {
 	view.mu.Lock()
 	delete(view.clients, client)
 	person := view.people[userID]
@@ -159,30 +161,30 @@ func (manager *Manager) unregister(sessionID uint64, view *audience, userID stri
 	if empty {
 		manager.remove(sessionID, view)
 	}
-	client.close("peer_closed")
 }
 
-// 摘除期间不嵌套目录锁与房间锁。物理断开由调用方在释放准入锁后执行。
-func (manager *Manager) detachRooms(roomID uint64) []*connection {
-	var clients []*connection
+// 摘除期间不嵌套目录锁与房间锁。写循环负责物理断开。
+func (manager *Manager) detachRooms(roomID uint64, reason string) {
+	manager.presenceMu.Lock()
+	defer manager.presenceMu.Unlock()
 	for id, view := range manager.roomList() {
 		if roomID != 0 && view.roomID != roomID {
 			continue
 		}
 		view.mu.Lock()
 		view.stop()
-		for client := range view.clients {
-			clients = append(clients, client)
+		clients := copyClients(view.clients)
+		for userID := range view.people {
+			if member := manager.members[userID]; member != nil && member.view == view {
+				delete(manager.members, userID)
+			}
 		}
 		view.mu.Unlock()
+		for _, client := range clients {
+			client.stop(reason)
+		}
+		manager.markOnlineChanged(view)
 		manager.remove(id, view)
-	}
-	return clients
-}
-
-func closeClients(clients []*connection, reason string) {
-	for _, client := range clients {
-		client.close(reason)
 	}
 }
 

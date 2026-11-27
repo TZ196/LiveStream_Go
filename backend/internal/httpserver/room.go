@@ -203,14 +203,10 @@ func (s *Server) closeRoom(ctx context.Context, c *app.RequestContext) {
 	}
 	value, err := s.rooms.Close(ctx, id, identity.UserID)
 	if s.realtime != nil {
-		var disconnect func()
 		if err == nil {
-			disconnect = s.realtime.DetachRoom(id)
+			s.realtime.DetachRoom(id)
 		}
 		s.realtime.UnlockAdmission()
-		if disconnect != nil {
-			disconnect()
-		}
 	}
 	if err != nil {
 		s.roomError(ctx, c, err)

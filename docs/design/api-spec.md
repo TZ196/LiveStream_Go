@@ -46,12 +46,12 @@
 | GET /api/v1/rooms/{id} | 无 | Room，200 | 包含关闭房间 |
 | POST /api/v1/rooms/{id}/close | 空 JSON 对象 | Room，200 | 仅房主结束本轮直播；连续重复关闭保留本轮 closed_at |
 | POST /api/v1/rooms/{id}/reopen | 空 JSON 对象 | Room，200 | 仅房主；原房间恢复 OPEN，closed_at=null；已 OPEN 时返回当前房间 |
-| POST /api/v1/rooms/{id}/ws-ticket | 空 JSON 对象 | ticket、expires_at、ws_path、session_id，201 | 仅开放房间；规则见下文 |
+| POST /api/v1/rooms/{id}/ws-ticket | mode，恢复时提供 watch_id | ticket、expires_at、ws_path、session_id、watch_id，201 | 仅开放房间，规则见下文 |
 | GET /api/v1/rooms/{id}/likes-state | 无 | state、session_id、room_status，200 | 读取房间与当前场次，供点赞前端识别恢复状态 |
 | GET /api/v1/rooms/{id}/sessions/{session_id}/like-leaderboard | Bearer，无查询参数 | 本场榜单与本人累计数，200 | 登录用户可读，首次进入与补取共用 |
 | GET /api/v1/rooms/{id}/danmaku | 可选 session_id、limit、cursor | items: Danmaku[]、next_cursor、consistency=eventual，200 | 已实现；已落库数据按 id 倒序，开放或关闭房间均可查询 |
 | GET /api/v1/rooms/{id}/danmaku/recent | 必需 session_id，可选 cursor | items、next_cursor，200 | 当前场次最近缓存；每次最多 20 条，详见下文 |
-| GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | **目标，尚未实现或注册**；下方示例为目标设计 |
+| GET /api/v1/rooms/{id}/stats | 无 | RoomStats，200 | 启用实时模块时注册，返回本实例当前场次人数和点赞快照 |
 
 User 字段：id、username、created_at。Room 字段：id、owner_id、title、status、created_at、closed_at；closed_at 在 OPEN 时为 null。Danmaku 字段：id、event_id、request_id、room_id、session_id、user_id、username、content、created_at；username 是发送时快照。V2 的历史、实时广播和最近缓存的 created_at 是服务端接收时间；缺少该字段的 V1 旧事件仍显示客户端事件时间。
 
@@ -61,11 +61,13 @@ User 字段：id、username、created_at。Room 字段：id、owner_id、title�
 
 ## 票据接口
 
-Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节的 base64url 票据。有效期为 30 秒且不超过 JWT 剩余有效期；exp 已到时不利用时钟宽限继续签发票据。只在当前 API 内存保存票据摘要、用户及用户名快照、房间、签发 Origin 和令牌到期时间。
+Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节的 base64url 票据。有效期最长 30 秒且受 JWT 期限约束。当前 API 内存保存票据摘要、用户、房间和场次、Origin、令牌到期时间及观看意图。签发阶段只读取 Redis 归属。
+
+主动进入提交 `{"mode":"enter"}`，服务端生成新的 `watch_id`。自动重连提交 `{"mode":"resume","watch_id":"原观看编号"}`。观看已被替换返回 `409 CONNECTION_REPLACED`，租约失效、场次改变或 Redis 进程身份变化返回 `409 WATCH_EXPIRED`。Redis 归属读取失败返回 `503 WS_OWNERSHIP_UNAVAILABLE`。前两个错误需要用户主动重新进入，临时不可用按 `Retry-After` 退避。此前发送空对象的客户端需和服务端同步升级。
 
 响应不缓存，设置 Cache-Control: no-store。ws_path 形如 /ws/rooms/1001?ticket=短时票据，前端根据当前环境补充 ws 或 wss 地址。原始票据只用于一次握手，握手失败后重新申请。不能将 access_token 放入此 URL。
 
-票据数量上限见 [架构容量边界](architecture.md)；超限拒绝申请，不无限缓存。API 重启会使未使用票据失效，客户端重新申请即可。浏览器 WebSocket 构造函数没有自定义请求头参数，因此采用 HTTP 换票方式，见 [MDN API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/WebSocket)。
+每账号每个对齐的 10 秒窗口最多申请 6 次，超限返回 `429 WS_TICKET_RATE_LIMITED` 和 `Retry-After`。票据总量见 [架构容量边界](architecture.md#容量和并发边界)。API 重启会使未使用票据失效。浏览器 WebSocket 构造函数没有自定义请求头参数，因此采用 HTTP 换票方式，见 [MDN API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket/WebSocket)。
 
 ## 本场点赞榜
 
@@ -79,7 +81,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 
 未登录返回 401。无效场次编号或附加查询参数返回 400，房间不存在返回 404，场次已结束或与当前房间不匹配返回 409。投影或依赖不可用返回 503。成功读取且无人点赞时才返回空榜。
 
-## 统计响应（目标，尚未实现）
+## 统计响应
 
 ```json
 {
@@ -99,7 +101,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 }
 ```
 
-目标 RoomStats 将包含以上字段，session_id 与 like_count 指向同一场次，旧场统计不并入新场。该接口和在线数目前均未实现，因此示例中的字段不是当前响应。点赞能力已由已实现的 `likes-state`、榜单接口和 WebSocket 状态提供；投影不可用时不能把缺失计数当作零。
+`online_count` 来自当前 API 的 RoomHub，`session_id` 与 `like_count` 指向同一场次。房间已关闭时，`session_id` 为 `null`，`online_count` 为 `0`。点赞投影不可用时 `likes_available=false`，`like_count`、`projection_epoch` 和 `likes_revision` 为 `null`。人数读取仍可返回。不存在的房间返回 `404`。
 
 ## 分页
 
@@ -122,7 +124,7 @@ Bearer 认证通过、Origin 合法且房间开放时，签发 32 随机字节�
 | 501 | CAPABILITY_NOT_ENABLED | 当前阶段尚未交付该能力 |
 | 500 | INTERNAL_ERROR | 保留 trace_id，不返回内部堆栈 |
 
-当前已实现创建、列表、详情、关闭、重新开播、房间票据、点赞状态/榜单和弹幕历史，均要求 Bearer 认证；stats 统计接口仍未实现。
+创建、列表、详情、关闭、重新开播、房间票据和统计、点赞状态与榜单、弹幕历史均要求 Bearer 认证。
 
 数据库、Redis 故障不得返回 200 加伪造成功值。弹幕历史在启用弹幕子系统时注册，词库错误不关闭历史查询。握手票据错误对应的握手响应见 WebSocket 协议。
 
@@ -134,7 +136,7 @@ GET /readyz 返回 JSON 和 Cache-Control: no-store。status 按 HTTP 生命周�
 
 GET /api/v1/rooms/{id}/likes-state 要求 Bearer，沿用普通响应外壳，返回 data={state,session_id,room_status}。state 为上述四种点赞状态；开放房间的 session_id 为十进制字符串，关闭时为 null。此接口只依赖 MySQL，可用于恢复期间首次取得场次并暂存点击；未启用点赞时 state 为 BLOCKED。该接口不向页面泄露原始错误、地址和凭据。
 
-ws-ticket 与 WebSocket 握手不依赖点赞 READY；恢复期间可建立共享连接，首屏分别报告业务能力与未知计数。启用点赞且恢复期间，房间创建、关闭、重开仍返回 503/LIKES_UNAVAILABLE，以保持点赞重建时场次集合稳定。登录、注册和房间读取按自身依赖正常服务。
+只要 Redis 归属可以确认，点赞尚在恢复时也可建立共享连接，首屏分别报告业务能力与未知计数。启用点赞且恢复期间，房间创建、关闭、重开仍返回 503/LIKES_UNAVAILABLE，以保持点赞重建时场次集合稳定。登录、注册和房间读取按自身依赖响应。
 
 API 在监听前检查 MySQL 连接、迁移版本和所需列，失败直接退出，因此初始化失败通常表现为连接不上 API。运行期间，每次就绪请求在 1 秒预算内重新执行只读检查；失败返回 not_ready/503，数据库恢复并通过检查后可重新返回 ready/200。检查不读取账号记录，也不证明所有索引、约束或业务功能均正确。
 

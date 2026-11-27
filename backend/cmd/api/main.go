@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/TZ196/LiveStream_Go/backend/internal/realtime"
 	"github.com/TZ196/LiveStream_Go/backend/internal/room"
 	"github.com/TZ196/LiveStream_Go/backend/internal/user"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -85,13 +87,35 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	roomService := room.NewService(roomRepository)
 	apiServer := httpserver.New(cfg, logger, db, userService, roomService, tokens)
 	manager := realtime.NewManager(roomService, nil, nil, nil, userRepository, "")
+	var wsRedis *redis.Client
 	if os.Getenv("LIVESTREAM_ENABLE_LIKES") == "true" || os.Getenv("LIVESTREAM_ENABLE_DANMAKU") == "true" {
+		limit, err := config.LoadWSConnectionLimit()
+		if err != nil {
+			return errors.Join(err, database.Close(db))
+		}
+		redisAddr := os.Getenv("LIVESTREAM_REDIS_ADDR")
+		if redisAddr == "" {
+			return errors.Join(errors.New("启用 WebSocket 须设置 LIVESTREAM_REDIS_ADDR"), database.Close(db))
+		}
+		wsRedis = redis.NewClient(&redis.Options{Addr: redisAddr, ContextTimeoutEnabled: true, MaxRetries: -1,
+			DialTimeout: 600 * time.Millisecond, ReadTimeout: 600 * time.Millisecond, WriteTimeout: 600 * time.Millisecond})
+		manager.ConfigureOwnership(wsRedis, limit)
 		apiServer.EnableRealtime(manager, os.Getenv("LIVESTREAM_WS_ORIGIN"))
 	}
 	capabilities, stopCapabilities := context.WithCancel(runCtx)
-	var capabilitiesDone = make(chan struct{})
-	go func() { defer close(capabilitiesDone); manager.RunCapabilities(capabilities) }()
-	defer func() { stopCapabilities(); <-capabilitiesDone; manager.Close() }()
+	var realtimeJobs sync.WaitGroup
+	realtimeJobs.Go(func() { manager.RunCapabilities(capabilities) })
+	if wsRedis != nil {
+		realtimeJobs.Go(func() { manager.RunPresence(capabilities) })
+	}
+	defer func() {
+		stopCapabilities()
+		realtimeJobs.Wait()
+		manager.Close()
+		if wsRedis != nil {
+			_ = wsRedis.Close()
+		}
+	}()
 	stopLikes, err := startLikes(runCtx, db, manager, logger)
 	if err != nil {
 		return errors.Join(err, database.Close(db))

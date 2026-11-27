@@ -63,7 +63,9 @@ npm run dev
 
 登录凭证保存于当前浏览器同源存储，刷新或重新打开页面可恢复，原有 30 分钟有效期不会延长；到期或主动退出后重新登录。同源标签页共享账号和退出状态，测试两个不同账号请使用独立浏览器或隐私窗口。首次更新旧版页面时，原内存凭证没有保存，需要登录一次。
 
-Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。直播间已接入 WebSocket 点赞、本场点赞榜、AC、共享 WebSocket 弹幕与历史；完整在线人数协议仍待交付。直播页面使用项目内的静态演示封面，桌面布局为头像旁点赞数、左画面、右上榜单与右下聊天；手机纵向排列。审核拒绝只短提示，未知结果从简洁状态入口核对，不展示待发送列表或数量。
+Vite 将 `/healthz`、`/readyz`、`/api` 和 `/ws` 代理到 `LIVESTREAM_API_TARGET`，默认 http://127.0.0.1:8080 。修改目标可在 frontend 目录执行 `LIVESTREAM_API_TARGET=http://127.0.0.1:8081 npm run dev`，或按 [前端配置样例](../frontend/.env.example) 设置 `.env.local` 后重启。主播信息旁显示在线人数与点赞总数，右侧为点赞榜和弹幕。用同一账号打开两个窗口即可验证替换，旧页面会提示并提供「重新进入」。票据请求格式已更新，前后端请一起切到新版本。
+
+`LIVESTREAM_WS_MAX_CONNECTIONS` 默认 256，是单 API 的连接保护阈值。握手中和退出中的连接也占用名额，可按负载测量调整。Redis 可用时才能登记新连接，普通 HTTP 就绪检查仍以 MySQL 为基础。
 
 HTTP 客户端请求超时为 5 秒，离开页面取消未完成请求，写请求不自动重试。业务页面不显示开发连接检查，排查服务状态时直接访问 /healthz 和 /readyz；`npm run build` 生成的 dist 不包含开发代理，目前尚未接入 API 静态托管。
 
