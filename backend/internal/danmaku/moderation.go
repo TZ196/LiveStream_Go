@@ -105,7 +105,8 @@ func ReadModerator(reader io.Reader) (*Moderator, error) {
 	}
 	sum := sha256.Sum256([]byte(canonical))
 	moderator.Version = hex.EncodeToString(sum[:])
-	// 广度优先构建失败指针，继承后缀输出，保证重叠词和后缀词不漏报。
+	// 按前缀长度逐层构建失败指针，短后缀的匹配结果已可直接继承。
+	// 例如词库含 abc 和 bc，读完 abc 时应同时报告这两个词。
 	queue := make([]int, 0, len(moderator.nodes))
 	for _, next := range moderator.nodes[0].Next {
 		queue = append(queue, next)
@@ -137,6 +138,7 @@ func (moderator *Moderator) Check(content string) []Match {
 	state := 0
 	var matches []Match
 	for index, ch := range text {
+		// 当前字符接不上时，沿失败指针尝试已读部分的较短后缀，继续匹配同一个字符。
 		for state != 0 {
 			if _, ok := moderator.nodes[state].Next[ch]; ok {
 				break

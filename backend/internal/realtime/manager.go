@@ -99,6 +99,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		http.Error(writer, "connection capacity exceeded", status)
 		return
 	}
+	// 登记成功即可归还这个账号的握手名额。已入房的连接持续占用总配额，直到读写循环都退出。
 	defer manager.freeConnection()
 	reserved := true
 	defer func() {
@@ -129,6 +130,7 @@ func (manager *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	client := manager.newConnection(socket)
+	// WebSocket 升级期间主播可能已经关播。重新核对场次后才允许新窗口接管旧观看。
 	manager.admission.RLock()
 	check, cancel = context.WithTimeout(request.Context(), time.Second)
 	active, err := manager.rooms.ActiveSession(check, roomID)
