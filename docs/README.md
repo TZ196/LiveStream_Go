@@ -21,6 +21,7 @@
 | 查看已完成、待解决和下一步 | [项目状态](status.md) |
 | 按阶段继续开发 | [开发计划](development-plan.md) |
 | 从源码读懂后端结构及点赞/弹幕链路 | [Backend 结构](../backend/ARCHITECTURE.md) |
+| 准备项目面试 | [项目面试简介](interview-project.md) |
 | 设计功能或对接接口 | 下方设计索引 |
 | 检查功能与查看证据 | [验证计划](verification/plan.md)及下方阶段报告 |
 | 查参考项目的来源与问题 | [源码审查](reviews/live-stream-danmaku-review.md) |
