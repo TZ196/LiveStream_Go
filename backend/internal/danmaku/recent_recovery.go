@@ -133,6 +133,7 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 	if err != nil {
 		return err
 	}
+	// Kafka 已接受的弹幕可能还没落库。等 MySQL 覆盖这次记下的分区位置，再读最近五分钟的明细。
 	for {
 		ready, err := recovery.repository.RecentCheckpointReady(ctx, room, consumer.TopicID(), targets)
 		if err != nil {
@@ -182,6 +183,7 @@ func (recovery *RecentRecovery) Recover(ctx context.Context, room, session strin
 			return err
 		}
 	}
+	// 发布临时集合时再核对令牌。旧任务若在锁过期后才完成，会在这里放弃发布。
 	result, err := finishRecentRecovery.Run(ctx, recovery.store.client, []string{lock, key, temp, key + ":ready"}, token, recentTTLMillis()).Int()
 	if err != nil {
 		return err

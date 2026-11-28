@@ -44,6 +44,7 @@ type Repository struct {
 
 func NewRepository(db *gorm.DB) *Repository { return &Repository{db: db} }
 
+// Create 把房间和首个直播场次放在同一事务里，两者都保存成功才算建房成功。
 func (r *Repository) Create(ctx context.Context, room *Room) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(room).Error; err != nil {
