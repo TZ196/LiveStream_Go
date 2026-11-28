@@ -13,9 +13,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// Publisher 将业务提交边界限制在 Broker 确认，传输错误不能解释成确定拒绝。
+// receivedAtKey 把本次接收时间传给生产者，供消费者统计从接收到分发的耗时。
 type receivedAtKey struct{}
 
+// Publisher 等待 Kafka 确认。本次调用超时时，消息仍可能已经写入。
 type Publisher interface {
 	Publish(context.Context, Event) error
 }
@@ -152,6 +153,7 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	}()
 	event := candidate
 	if claim[1] != "" {
+		// 上次审核通过时已冻结整条事件。重试沿用原文、用户名、审核版本和接收时间。
 		event, err = storedEvent(claim[1], candidate)
 		if err != nil {
 			return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "冻结事件需要核对", Pending: true, Retryable: true, RetryAfter: 2000}
@@ -189,15 +191,17 @@ func (service *Service) Submit(ctx context.Context, userID, roomID, sessionID, r
 	beforePublish := time.Now()
 	err = service.publisher.Publish(ctx, event)
 	service.Metrics.Publish.Observe(time.Since(beforePublish).Seconds())
-	// 发布结果和保存状态分别处理。清理使用独立短预算，不因请求取消泄漏执行权。
+	// 客户端可能已断开，用独立的短超时完成请求登记的收尾。
 	finish, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err != nil {
+		// Kafka 的结果仍未知。只释放这次处理权，保留冻结事件供同一个请求重试。
 		_ = service.Store.Change(finish, event, owner, "release", "", "")
 		service.Metrics.Results.WithLabelValues("unconfirmed").Inc()
 		return Event{}, &Fault{Code: "REQUEST_IN_PROGRESS", Message: "弹幕结果尚未确认，请保留原请求", Pending: true, Retryable: true, RetryAfter: 1000}
 	}
 	if err := service.Store.Change(finish, event, owner, "accept", string(raw), event.ModerationVersion); err != nil {
+		// Kafka 已确认接受。Redis 标记回写失败只记指标，客户端仍应收到本次接受结果。
 		service.Metrics.Results.WithLabelValues("accepted_cache_failed").Inc()
 	}
 	service.Metrics.Results.WithLabelValues("accepted").Inc()

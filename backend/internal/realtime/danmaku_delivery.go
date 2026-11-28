@@ -28,6 +28,7 @@ func (manager *Manager) QueueDanmaku(ctx context.Context, record danmaku.Record)
 	if strconv.FormatUint(view.roomID, 10) != record.Event.RoomID {
 		return danmaku.ErrConflict
 	}
+	// 结果通道留一格，即使等待方已超时，分发协程也能交回结果并处理下一条。
 	item := danmakuDelivery{record: record, ctx: ctx, result: make(chan error, 1)}
 	select {
 	case view.dispatch <- item:
@@ -50,6 +51,7 @@ func (manager *Manager) QueueDanmaku(ctx context.Context, record danmaku.Record)
 	}
 }
 
+// dispatchDanmaku 在一个场次内串行分发，该场次的近期广播去重记录也由它独占。
 func (manager *Manager) dispatchDanmaku(view *audience) {
 	defer manager.dispatchWait.Done()
 	for {
@@ -78,6 +80,7 @@ func (manager *Manager) fanoutDanmaku(view *audience, item danmakuDelivery) erro
 	if err := view.mu.LockContext(item.ctx); err != nil {
 		return err
 	}
+	// 在房间锁内取得观众快照，释放锁后再编码、逐连接入队。实际发送由每条连接的写协程完成。
 	clients := copyClients(view.clients)
 	closed := view.closed.Load()
 	view.mu.Unlock()

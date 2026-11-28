@@ -148,6 +148,7 @@ func (consumer *Consumer) processRecord(ctx context.Context, raw *kgo.Record, pr
 			}
 			continue
 		}
+		// 三次失败后，格式错误或内容冲突才交给该组的隔离回调。依赖故障保留原位移，等恢复后重读。
 		if code == "" {
 			consumer.observeFailure("dependency_failed")
 			return fmt.Errorf("弹幕事件处理重试耗尽，保留原位移: %w", err)

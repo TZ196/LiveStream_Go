@@ -151,6 +151,7 @@ func (recovery *Recovery) Rebuild(ctx context.Context) (*ProjectionRepository, *
 	if err != nil {
 		return nil, nil, err
 	}
+	// 暂停发布后记下各分区的末端位置。只有 Worker 将这些位置之前的记录全部落库，才能据此重建。
 	barrier, err := realtime.logOffsets(ctx, -1)
 	if err != nil {
 		return nil, nil, err
@@ -199,6 +200,7 @@ func (recovery *Recovery) Rebuild(ctx context.Context) (*ProjectionRepository, *
 		if err := snapshot.validateRecoveryHistory(ctx); err != nil {
 			return err
 		}
+		// 从场次表开始才能覆盖零赞场次。个人计数和后面的去重记录都从这份 MySQL 快照读取。
 		var after uint64
 		for {
 			sessions, err := snapshot.recoverySessions(ctx, after)
@@ -277,6 +279,7 @@ func (recovery *Recovery) Rebuild(ctx context.Context) (*ProjectionRepository, *
 	}
 	// 切换开始后保留已验证的新数据，避免结果未知的数据库更新已成功而被清理。
 	activationStarted = true
+	// 实时组的位置先对齐并读回，再启用新版本。恢复消费时从已重建数据的边界接着读。
 	if err = realtime.resetOffsets(ctx, barrier); err != nil {
 		return nil, nil, err
 	}

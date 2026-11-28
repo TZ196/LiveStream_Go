@@ -155,5 +155,6 @@ func processLike(ctx context.Context, record likes.ConsumedLike, initializer *li
 	if err != nil {
 		return err
 	}
+	// 重放时即使 Redis 已经计过数，也要同步本场快照。上次可能恰好在这两步之间退出。
 	return manager.QueueLikeUpdate(ctx, record.Event, result)
 }
