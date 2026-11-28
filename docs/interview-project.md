@@ -218,7 +218,7 @@ API 持有真实 WebSocket，处理准入、发布及实时分发。Worker 独�
 - 独立订阅
 - 端到端观察点
 
-**问题来源：** [弹幕发布确认](../backend/internal/danmaku/service.go#L189) · [广播与缓存组](../backend/cmd/api/danmaku.go) · [Worker 落库](../backend/internal/danmaku/persistence.go#L64)
+**问题来源：** [弹幕发布确认](../backend/internal/danmaku/service.go#L191) · [广播与缓存组](../backend/cmd/api/danmaku.go) · [Worker 落库](../backend/internal/danmaku/persistence.go#L64)
 
 **考察目的：** 看候选人能否给成功定义边界，并解释三个不同时间点。
 
@@ -296,7 +296,7 @@ MySQL 保存账号、场次、事件明细和数据库进度。Kafka 保存有�
 - 权限
 - 生命周期与历史隔离
 
-**问题来源：** [房间与场次事务](../backend/internal/room/repository.go#L47) · [房间领域模型](design/domain-model.md)
+**问题来源：** [房间与场次事务](../backend/internal/room/repository.go#L48) · [房间领域模型](design/domain-model.md)
 
 **考察目的：** 判断是否用正确的业务身份约束点赞、弹幕和迟到请求。
 
@@ -712,7 +712,7 @@ Goroutine 是 Go 调度的执行单元，M 是系统线程，P 提供执行 Go �
 - 活动场次唯一性
 - 在途边界
 
-**问题来源：** [房间事务](../backend/internal/room/repository.go#L80) · [活动场次约束](../backend/migrations/000004_create_sessions_likes.go) · [弹幕准入](../backend/internal/danmaku/service.go#L63) · [点赞准入](../backend/internal/realtime/likes.go)
+**问题来源：** [房间事务](../backend/internal/room/repository.go#L81) · [活动场次约束](../backend/migrations/000004_create_sessions_likes.go) · [弹幕准入](../backend/internal/danmaku/service.go#L64) · [点赞准入](../backend/internal/realtime/likes.go)
 
 **考察目的：** 区分事务内的互斥与数据库、Kafka 之间的业务边界。
 
@@ -838,7 +838,7 @@ Goroutine 是 Go 调度的执行单元，M 是系统线程，P 提供执行 Go �
 - 冻结事件
 - 结果未知
 
-**问题来源：** [提交状态机](../backend/internal/danmaku/service.go#L63) · [登记脚本](../backend/internal/danmaku/lua/begin_request.lua) · [条件变更](../backend/internal/danmaku/lua/change_request.lua) · [客户端队首](../frontend/src/danmaku.ts)
+**问题来源：** [提交状态机](../backend/internal/danmaku/service.go#L64) · [登记脚本](../backend/internal/danmaku/lua/begin_request.lua) · [条件变更](../backend/internal/danmaku/lua/change_request.lua) · [客户端队首](../frontend/src/danmaku.ts)
 
 **考察目的：** 用一次超时贯穿准入、审核和跨系统幂等。
 
@@ -1094,7 +1094,7 @@ Goroutine 是 Go 调度的执行单元，M 是系统线程，P 提供执行 Go �
 - Socket 写入
 - 跨实例
 
-**问题来源：** [场次队列](../backend/internal/realtime/audience.go#L69) · [串行分发与扇出](../backend/internal/realtime/danmaku_delivery.go#L53) · [连接发送](../backend/internal/realtime/delivery.go#L143)
+**问题来源：** [场次队列](../backend/internal/realtime/audience.go#L69) · [串行分发与扇出](../backend/internal/realtime/danmaku_delivery.go#L55) · [连接发送](../backend/internal/realtime/delivery.go#L143)
 
 **考察目的：** 从“一条消息到一万个人”追问计算、队列、语义和扩展成本。
 
@@ -1178,7 +1178,7 @@ Goroutine 是 Go 调度的执行单元，M 是系统线程，P 提供执行 Go �
 - 失效复核
 - 可取消锁
 
-**问题来源：** [场次锁与移除](../backend/internal/realtime/audience.go) · [广播遍历](../backend/internal/realtime/danmaku_delivery.go#L67) · [连接停用](../backend/internal/realtime/presence.go#L81)
+**问题来源：** [场次锁与移除](../backend/internal/realtime/audience.go) · [广播遍历](../backend/internal/realtime/danmaku_delivery.go#L69) · [连接停用](../backend/internal/realtime/presence.go#L81)
 
 **考察目的：** 考察共享对象的生命周期和锁持有范围。
 
@@ -1340,7 +1340,7 @@ Redis 是即时计数和榜单的数据来源。本机有观众时还要把新�
 - WaitGroup
 - 退出顺序
 
-**问题来源：** [连接关闭与等待](../backend/internal/realtime/manager.go#L255) · [场次销毁](../backend/internal/realtime/audience.go#L191) · [分发等待](../backend/internal/realtime/danmaku_delivery.go) · [API 关闭](../backend/cmd/api/main.go)
+**问题来源：** [连接关闭与等待](../backend/internal/realtime/manager.go#L257) · [场次销毁](../backend/internal/realtime/audience.go#L191) · [分发等待](../backend/internal/realtime/danmaku_delivery.go) · [API 关闭](../backend/cmd/api/main.go)
 
 **考察目的：** 从协程的创建者追到退出信号与验证手段。
 
@@ -1424,7 +1424,7 @@ Redis 是即时计数和榜单的数据来源。本机有观众时还要把新�
 - LIMIT+1
 - 执行计划
 
-**问题来源：** [历史查询](../backend/internal/danmaku/persistence.go#L174) · [房间与场次索引](../backend/migrations/000007_create_danmaku_messages.go#L20) · [回填查询](../backend/internal/danmaku/recent_recovery.go#L196) · [MySQL 复合索引](https://dev.mysql.com/doc/refman/8.4/en/multiple-column-indexes.html)
+**问题来源：** [历史查询](../backend/internal/danmaku/persistence.go#L174) · [房间与场次索引](../backend/migrations/000007_create_danmaku_messages.go#L20) · [回填查询](../backend/internal/danmaku/recent_recovery.go#L198) · [MySQL 复合索引](https://dev.mysql.com/doc/refman/8.4/en/multiple-column-indexes.html)
 
 **考察目的：** 要求从真实查询条件推导索引并指出另一条查询的代价。
 
@@ -1760,7 +1760,7 @@ live.events 承载点赞，live-realtime 做投影，live-persistence 落库。l
 - 内容绑定
 - 去重层次
 
-**问题来源：** [点赞事件构造](../backend/internal/likes/event.go#L75) · [弹幕事件构造](../backend/internal/danmaku/event.go) · [弹幕请求核对](../backend/internal/danmaku/service.go#L63)
+**问题来源：** [点赞事件构造](../backend/internal/likes/event.go#L75) · [弹幕事件构造](../backend/internal/danmaku/event.go) · [弹幕请求核对](../backend/internal/danmaku/service.go#L64)
 
 **考察目的：** 区分协议重传、应用重试、消费重放和前端重复展示。
 
@@ -2399,7 +2399,7 @@ Redis 可以登记当前连接在哪个节点，但套接字、在线集合和�
 - 故障不确定性
 - 实现成本
 
-**问题来源：** [当前状态与发布顺序](../backend/internal/danmaku/service.go#L63) · [Redis 身份变化保护](../backend/internal/danmaku/requests.go) · [持久化查回](../backend/internal/danmaku/persistence.go)
+**问题来源：** [当前状态与发布顺序](../backend/internal/danmaku/service.go#L64) · [Redis 身份变化保护](../backend/internal/danmaku/requests.go) · [持久化查回](../backend/internal/danmaku/persistence.go)
 
 **考察目的：** 比较符合本项目规模的简化方案，以及加强保证时要付什么代价。
 
@@ -2441,7 +2441,7 @@ Redis 可以登记当前连接在哪个节点，但套接字、在线集合和�
 - 隔离与对账
 - 可用性
 
-**问题来源：** [接受入口](../backend/internal/realtime/likes.go) · [投影冲突映射](../backend/internal/likes/projection.go) · [点赞恢复门控](../backend/cmd/api/likes.go) · [房间门控](../backend/internal/realtime/manager.go#L271)
+**问题来源：** [接受入口](../backend/internal/realtime/likes.go) · [投影冲突映射](../backend/internal/likes/projection.go) · [点赞恢复门控](../backend/cmd/api/likes.go) · [房间门控](../backend/internal/realtime/manager.go#L273)
 
 **考察目的：** 检验能否主动承认一个能从当前代码推出的真实缺陷，并提出可验证的修复。
 
@@ -2549,13 +2549,13 @@ Redis 可以登记当前连接在哪个节点，但套接字、在线集合和�
 
 | 优先级 | 证据与触发场景 | 候选改法及如何验收 |
 | --- | --- | --- |
-| 高 | **点赞异内容冲突会扩大故障范围。** 已接受消息在投影时发生指纹冲突，进入 BLOCKED，并影响部分房间变更。[投影实现](../backend/internal/likes/projection.go)、[准入门控](../backend/internal/realtime/manager.go#L271) | 入口绑定请求身份与次数，给历史冲突定义两组一致的隔离裁决。用同号异内容、重放与无关房间操作同时验证。[056](#q056) |
+| 高 | **点赞异内容冲突会扩大故障范围。** 已接受消息在投影时发生指纹冲突，进入 BLOCKED，并影响部分房间变更。[投影实现](../backend/internal/likes/projection.go)、[准入门控](../backend/internal/realtime/manager.go#L273) | 入口绑定请求身份与次数，给历史冲突定义两组一致的隔离裁决。用同号异内容、重放与无关房间操作同时验证。[056](#q056) |
 | 高 | **单 Broker 单副本。** 已确认记录依赖本地唯一副本，磁盘级故障会影响可恢复性。[Compose](../deployments/docker/compose.yaml) | 多副本及最小同步副本配置需要独立部署验证，检查缺副本时的拒写和重新选主后的已确认记录。[012](#q012) |
 | 高 | **Redis 的业务键和可回填缓存共用资源。** 目前指定 noeviction，未设显式 maxmemory 和自动阈值保护。重建还需容纳新旧 epoch。[部署配置](../deployments/docker/compose.yaml)、[重建流程](../backend/internal/likes/recovery.go) | 测各类键实占、持续增长与重建峰值，再设置内存预算、告警和保留去重证据的准入措施。[037](#q037) |
 | 高 | **弹幕存在无法快速确认的旧请求。** Redis 身份变化时，冻结记录缺失且 SQL 尚无结果，成功与否可能长期未知。[请求账本](../backend/internal/danmaku/requests.go)、[当前状态](status.md#待解决问题) | 保留原请求和可见的待核对状态。若产品要求可查询终局，评估耐久请求表与事务外发，并重定义 ACK。[055](#q055) |
 | 高 | **多 API 扩容有三个业务缺口。** 本地票据、单组分区投递给单节点、本地人数各有跨节点问题。[票据仓](../backend/internal/realtime/ticket.go)、[成员集合](../backend/internal/realtime/presence.go) | 两节点实际分流，同房发一条弹幕、换房再停一个节点，核验跨节点收帧和人数收敛。[052](#q052) |
 | 中 | **热房扇出和连接写带宽待测。** 每事件对本机 N 个观众尝试 N 次投递，持续输入过快会向 Kafka 传递反压。[广播实现](../backend/internal/realtime/danmaku_delivery.go) | 同时改变观众数与发送率，记录尾延迟、积压和慢连接退出。据结果决定分片扇出或热房公平配额。[024](#q024)、[048](#q048) |
-| 中 | **缓存写扫描和直接历史查询有代价。** 最近缓存可能逐个解 JSON。SQL 历史有分页上限，缺专用的用户频率与并发预算，回填还可能扫旧行。[Lua](../backend/internal/danmaku/lua/recent_add.lua)、[历史入口](../backend/internal/httpserver/danmaku.go)、[回填 SQL](../backend/internal/danmaku/recent_recovery.go#L196) | 分别测脚本耗时、历史池等待和回填扫描行数，再评估旁路指纹索引、查询预算或新索引。[032](#q032)、[034](#q034)、[035](#q035) |
+| 中 | **缓存写扫描和直接历史查询有代价。** 最近缓存可能逐个解 JSON。SQL 历史有分页上限，缺专用的用户频率与并发预算，回填还可能扫旧行。[Lua](../backend/internal/danmaku/lua/recent_add.lua)、[历史入口](../backend/internal/httpserver/danmaku.go)、[回填 SQL](../backend/internal/danmaku/recent_recovery.go#L198) | 分别测脚本耗时、历史池等待和回填扫描行数，再评估旁路指纹索引、查询预算或新索引。[032](#q032)、[034](#q034)、[035](#q035) |
 | 中 | **签票峰值可能出现锁竞争。** 当前在票据表的互斥锁内扫描过期项，表设 10,000 条上限。[签票代码](../backend/internal/realtime/ticket.go#L34) | 测批量申请、集中到期及高水位时的锁等待和握手成功率，再决定是否分桶过期或拆锁。[016](#q016)、[027](#q027) |
 | 中 | **重建有时间与一致性边界。** 全量扫描、数据库一致快照及在旁构建新版本均有成本。一次重建尝试的预算是 2 分钟，数据量大时可能反复超时，恢复中再次掉电也未做自动接管。[重建预算](../backend/cmd/api/likes.go)、[恢复代码](../backend/internal/likes/recovery.go#L132)、[专项边界](verification/reports/like-recovery.md#交付边界) | 按场次数、活跃用户数和事件量测重建耗时、内存及 SQL 压力，只有可信基线和完整日志可用时再评估增量重放。[043](#q043)、[054](#q054) |
 | 中 | **长期运营证据和失败处理工具不足。** 弹幕业务组有隔离表，后续自动修复/管理界面、通用积压阈值和小时级容量尚待交付。[隔离表](../backend/migrations/000008_create_failed_events.go)、[项目状态](status.md#待解决问题) | 分别验收故障留证、修复后重放与同负载长稳，不把短测确认数换算成生产 SLA。[045](#q045)、[051](#q051) |
